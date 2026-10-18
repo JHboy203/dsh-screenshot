@@ -1,0 +1,46 @@
+{
+  "name": "dsh-screenshot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH GUI 插件：QQ 同款截图（框选 + 标注 + 提取文字 + 贴图 + 录屏 + 长截图），按钮挂在对话输入框「语音」键旁。渲染进程拿不到屏幕（官方主会话无 setDisplayMediaRequestHandler），所以抓屏在宿主半边用 PowerShell/.NET 做，经 Typert Remote 把图交给浏览器半边画。",
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./typert": "./typert.host.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "typert.host.mjs",
+    "lib",
+    "ps",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "engines": {
+    "dsh": ">=0.1.2-rc.1 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.2-rc.1 <0.3.0"
+  }
+}

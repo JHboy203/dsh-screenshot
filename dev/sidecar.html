@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>dsh-screenshot sidecar —— apply() + 抓屏热键 + 回车投递 全链路</title>
+<style>
+  body{margin:0;font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;display:flex;align-items:flex-start}
+  #fake{width:420px;min-height:100vh;background:#f6f6f7;border-right:1px solid #d8d8dc;padding:10px;box-sizing:border-box}
+  #log{flex:1;margin:0;padding:10px 12px;white-space:pre-wrap;font:12px/1.5 ui-monospace,Consolas,monospace;
+       background:#14161a;color:#8ef0a8;min-height:100vh;box-sizing:border-box}
+  /* 假装成 DSH 的输入框卡片（插件靠这两个属性找宿主） */
+  [data-composer-card]{border:1px solid #ccc;border-radius:10px;padding:10px;background:#fff}
+  [data-composer-input]{min-height:38px;color:#888}
+  #fake img{width:28px;height:28px;border:1px solid #09f;margin-top:4px}
+</style>
+</head>
+<body>
+
+<div id="fake">
+  <p style="opacity:.6">⬇ 假输入框卡片 + 槽容器（模拟官方 DOM）</p>
+  <div data-composer-card>
+    <div data-composer-input>（假的 contenteditable）</div>
+    <div class="tools">
+      <button class="fakeBtn">＋</button>
+      <div data-slot="conversation.input.left"></div>
+      <button class="fakeBtn">🎤</button>
+      <button class="fakeBtn">⋮</button>
+    </div>
+  </div>
+</div>
+<pre id="log"></pre>
+
+<script>
+const logEl = document.getElementById('log')
+const log = (m) => { logEl.textContent += m + '\n' }
+const S = window.__sidecar = { step: 'boot', errors: [], capCalls: [], saveCalls: [], slotRegs: [] }
+window.addEventListener('error', (e) => S.errors.push('error: ' + String(e.message)))
+window.addEventListener('unhandledrejection', (e) =>
+  S.errors.push('reject: ' + String((e.reason && e.reason.message) || e.reason)))
+
+/* 一张像样的假截图（400x300）——1x1 会让选区坐标换算退化，测不出真东西 */
+const fakeShot = (() => {
+  const c = document.createElement('canvas')
+  c.width = 400; c.height = 300
+  const g = c.getContext('2d')
+  g.fillStyle = '#2b4a6f'; g.fillRect(0, 0, 400, 300)
+  g.fillStyle = '#fff'; g.font = '18px sans-serif'; g.fillText('fake screen 400x300', 20, 40)
+  return c.toDataURL('image/png')
+})()
+
+/* ── 观测点：把"官方会做的事"用桩复刻出来，才验得到真实效果 ──────────────
+   官方 ui-attachment 的 drop 监听挂在 **document** 上，唯一的门是
+   `dataTransfer.types.includes("Files")`。这里照这条复刻：收到带 Files 的 drop
+   → 往输入框塞一张 blob: 图片（= 官方"附件缩略图"的行为），于是插件里的
+   `countComposerImages()`（img[src^="blob:"]）就能看见它。 */
+const OBS = S.obs = { dropSeen: 0, dropTypes: null, dropFiles: 0, dropHasPng: false, pasteSeen: 0, clipWrites: 0, clipKinds: null }
+document.addEventListener('drop', (ev) => {
+  OBS.dropSeen += 1
+  const dt = ev.dataTransfer
+  const types = dt ? Array.from(dt.types || []) : []
+  OBS.dropTypes = types
+  OBS.dropFiles = dt && dt.files ? dt.files.length : 0
+  OBS.dropHasPng = !!(dt && dt.files && dt.files[0] && dt.files[0].type === 'image/png')
+  if (types.includes('Files')) {
+    const img = document.createElement('img')
+    img.src = URL.createObjectURL(new Blob(['fake'], { type: 'image/png' }))
+    document.querySelector('[data-composer-card]').appendChild(img)
+  }
+})
+document.querySelector('[data-composer-input]').addEventListener('paste', () => { OBS.pasteSeen += 1 })
+try {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      write: async (items) => {
+        OBS.clipWrites += 1
+        const it = items && items[0]
+        OBS.clipKinds = it && it.types ? Array.from(it.types) : null
+      }
+    }
+  })
+} catch (e) { S.errors.push('clipboard stub: ' + e.message) }
+
+/* ── 桩 React（真身在宿主种子表里，本地没有）── */
+const React = {
+  createElement: (type, props, ...children) => ({ __el: true, type, props: props || {}, children }),
+  Fragment: Symbol('Fragment'),
+  useState: (init) => [typeof init === 'function' ? init() : init, () => undefined],
+  useEffect: () => undefined,
+  useMemo: (fn) => fn(),
+  useCallback: (fn) => fn,
+  useRef: (init) => ({ current: init })
+}
+const ReactDOM = { createPortal: (node, container) => ({ __portal: true, node, container }) }
+const ReactDOMClient = { createRoot: () => ({ render() {}, unmount() {} }) }
+const requireShim = (id) => {
+  if (id === 'react') return React
+  if (id === 'react-dom') return ReactDOM
+  if (id === 'react-dom/client') return ReactDOMClient
+  throw new Error('unexpected require: ' + id)
+}
+
+let captured = null
+window.__ModuleLoader__ = { load(config) { captured = config } }
+
+/* ── 桩 ctx（remote 必须返回 typert 外层 {ok,value}，unwrap 只认这个）── */
+const wrapped = (value) => ({ ok: true, value })
+const shotRemote = {
+  cap: async (mode, hide, method) => {
+    S.capCalls.push({ mode, hide, method })
+    return wrapped({ ok: true, id: 'shot-1', dataUrl: fakeShot, width: 400, height: 300, path: 'shots/shot-1.png', mime: 'image/png', method: method || 'screen', bytes: 4096 })
+  },
+  ocr: async () => wrapped({ ok: true, text: '假的 OCR 结果', lines: 1 }),
+  record: async () => wrapped({ ok: true, state: 'idle' }),
+  scroll: async () => wrapped({ ok: true, id: 'shot-2', dataUrl: fakeShot, width: 400, height: 300 }),
+  save: async (dataUrl, name) => { S.saveCalls.push(String(name)); return wrapped({ ok: true, path: 'shots/' + name + '.png', dir: 'shots' }) },
+  list: async () => wrapped({ ok: true, items: [] }),
+  status: async () => wrapped({ ok: true, shots: 0 })
+}
+function makeScope(which) {
+  const slots = {
+    inject(name, cb) { cb() },
+    register(entry) { S.slotRegs.push({ slot: entry && entry.name, id: entry && entry.id, order: entry && entry.order }); return () => undefined }
+  }
+  return which === 'slots' ? { slots } : { remote: { shot: shotRemote } }
+}
+const ctx = {
+  effect(fn, label) { try { return fn() } catch (e) { S.errors.push('effect(' + label + '): ' + e.message) } },
+  inject(deps, cb) {
+    const which = (deps || []).some((d) => String(d).indexOf('slots') !== -1) ? 'slots' : 'remote'
+    S.injectDeps = (S.injectDeps || []).concat([deps.join('+')])
+    return cb(makeScope(which))
+  },
+  remote: { $mount: async (opts) => { S.mountOpts = { package: opts && opts.package, descriptors: (opts && opts.descriptors || []).length } } }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+async function main() {
+  S.step = 'loading'
+  await new Promise((res, rej) => {
+    const el = document.createElement('script')
+    el.src = '../client.js'
+    el.onload = res
+    el.onerror = () => rej(new Error('client.js 加载失败'))
+    document.head.appendChild(el)
+  })
+  S.step = 'loaded'
+  if (captured === null) { S.errors.push('bundle 没调用 __ModuleLoader__.load'); S.step = 'failed'; return }
+  S.bundleId = captured.id
+  const mod = captured.factory(requireShim)
+  S.exports = { name: mod.name, inject: mod.inject, hasApply: typeof mod.apply === 'function' }
+  S.step = 'applying'
+  await mod.apply(ctx)
+  S.step = 'applied'
+  S.stylesInjected = document.querySelectorAll('style').length
+  await sleep(2900)                       // 等开机快照（顺带验 shot.api.save 接线）
+  S.saveCallsAfterBoot = S.saveCalls.slice()
+
+  /* ① 热键 → 抓屏 → 覆盖层 */
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, altKey: true, bubbles: true, cancelable: true }))
+  await sleep(600)
+  S.overlayRoot = !!document.querySelector('.dshot-root')
+  S.overlayNodes = document.querySelectorAll('.dshot-root *').length
+  const canvas = document.querySelector('.dshot-root canvas')
+  S.hasCanvas = !!canvas
+
+  /* ② 真拖一个选区（覆盖层：canvas 上 mousedown + document 上的 mousemove/mouseup）*/
+  if (canvas) {
+    const r = canvas.getBoundingClientRect()
+    const at = (x, y) => ({ clientX: r.left + x, clientY: r.top + y, bubbles: true, cancelable: true, button: 0 })
+    canvas.dispatchEvent(new MouseEvent('mousedown', at(40, 40)))
+    document.dispatchEvent(new MouseEvent('mousemove', at(220, 180)))
+    document.dispatchEvent(new MouseEvent('mouseup', at(220, 180)))
+    await sleep(150)
+    S.afterDrag = { tools: !!document.querySelector('.dshot-tools'), bar: !!document.querySelector('.dshot-bar'), sel: !!document.querySelector('.dshot-sel') }
+  }
+
+  /* ③ 回车 = 完成（复制剪贴板 + 合成 drop 贴进输入框）*/
+  const beforeImgs = document.querySelectorAll('img[src^="blob:"]').length
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await sleep(1000)
+  S.deliver = {
+    clipWrites: OBS.clipWrites,
+    clipKinds: OBS.clipKinds,
+    dropSeen: OBS.dropSeen,
+    dropTypes: OBS.dropTypes,
+    dropFiles: OBS.dropFiles,
+    dropHasPngFile: OBS.dropHasPng,
+    pasteSeen: OBS.pasteSeen,
+    composerImgsBefore: beforeImgs,
+    composerImgsAfter: document.querySelectorAll('img[src^="blob:"]').length,
+    overlayClosed: !document.querySelector('.dshot-root'),
+    toasts: Array.from(document.querySelectorAll('.dshot-toast')).map((el) => String(el.textContent || '').slice(0, 60))
+  }
+  S.step = 'done'
+  log('step: ' + S.step + '   bundle: ' + S.bundleId)
+  log('mountOpts: ' + JSON.stringify(S.mountOpts))
+  log('injectDeps: ' + JSON.stringify(S.injectDeps))
+  log('slotRegs: ' + JSON.stringify(S.slotRegs))
+  log('saveCalls(boot): ' + JSON.stringify(S.saveCallsAfterBoot))
+  log('capCalls(hotkey): ' + JSON.stringify(S.capCalls))
+  log('overlay: root=' + S.overlayRoot + ' canvas=' + S.hasCanvas + ' nodes=' + S.overlayNodes)
+  log('afterDrag: ' + JSON.stringify(S.afterDrag))
+  log('deliver: ' + JSON.stringify(S.deliver))
+  log('errors: ' + JSON.stringify(S.errors))
+}
+main().catch((e) => { S.step = 'threw'; S.errors.push('main: ' + String((e && e.message) || e)); log('THREW: ' + e) })
+</script>
+</body>
+</html>

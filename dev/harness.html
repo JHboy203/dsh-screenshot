@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-screenshot · 标注覆盖层自验台</title>
+<style>
+  html,body{margin:0;height:100%;background:#14161a;color:#c9d1d9;font:13px/1.6 "Microsoft YaHei",system-ui,sans-serif}
+  #log{padding:10px 14px;white-space:pre-wrap;font-family:Consolas,monospace;font-size:12px}
+  #panel{position:fixed;right:12px;top:12px;z-index:10;display:flex;gap:6px;flex-wrap:wrap;max-width:420px}
+  #panel button{font:inherit;font-size:12px;padding:5px 9px;border-radius:7px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer}
+  #panel button:hover{background:#30363d}
+  #thumb{margin:8px 14px;border:1px solid #30363d;border-radius:6px;max-width:90vw}
+</style>
+</head>
+<body>
+<div id="panel">
+  <button data-act="reset">重置覆盖层</button>
+  <button data-act="select">设选区 200,150,600,400</button>
+  <button data-act="tools">逐个工具试点</button>
+  <button data-act="compose">compose() 并回报尺寸</button>
+  <button data-act="full">整屏 compose</button>
+  <button data-act="undo">撤销×2</button>
+  <button data-act="ocr">OCR 回调</button>
+</div>
+<div id="log">自验台就绪。覆盖层会在下面渲染；按钮用来驱动它并打印结果。</div>
+<div id="thumbs"></div>
+
+<script type="module">
+/**
+ * 覆盖层源码的**唯一真源在 ../client.js 里**（官方客户端模块只服务声明过的 chunk，
+ * 拿不到任意路径的文件，所以覆盖层只能内联进 client.js）。
+ * 这里把那段抠出来 eval —— 于是 harness 验的就是真正装进 DSH 的那份代码，永不漂移。
+ */
+const MARK_START = 'const DSHOT_CSS = '
+const MARK_END = '\n\t\t/* ══════════════ 偏好 ══════════════ */'
+
+const log = (m) => {
+  const el = document.getElementById('log')
+  el.textContent += '\n' + m
+  console.log('[harness]', m)
+}
+const report = (name, value) => log(name + ': ' + JSON.stringify(value))
+
+const clientSrc = await (await fetch('../client.js', { cache: 'no-store' })).text()
+const i0 = clientSrc.indexOf(MARK_START)
+const i1 = clientSrc.indexOf(MARK_END)
+if (i0 < 0 || i1 < 0 || i1 <= i0) {
+  log('FATAL: 从 client.js 里找不到覆盖层块 i0=' + i0 + ' i1=' + i1)
+  throw new Error('overlay block not found in client.js')
+}
+const overlaySrc = clientSrc.slice(i0, i1)
+log('从 client.js 抠出覆盖层源码 ' + overlaySrc.length + ' 字符')
+const createShotOverlay = new Function(overlaySrc + '\n; return createShotOverlay;')()
+log('createShotOverlay 解析成功: ' + typeof createShotOverlay)
+
+let overlay = null
+
+const img = new Image()
+img.onload = () => {
+  log('sample loaded ' + img.naturalWidth + 'x' + img.naturalHeight)
+  mount()
+}
+img.onerror = () => log('sample 加载失败')
+img.src = '/.tmp-vision/cap-desktop.png'
+
+function mount() {
+  if (overlay !== null) overlay.destroy()
+  overlay = createShotOverlay({
+    image: img,
+    dpr: window.devicePixelRatio || 1,
+    ocr: async (rect) => {
+      report('ocr callback rect', rect)
+      return { ok: true, text: '模拟识别结果 第 1 行\n第二行 Hello OCR', lines: [{ text: '模拟识别结果', x: 0, y: 0, w: 10, h: 10 }] }
+    },
+    save: async (dataUrl) => {
+      report('save callback bytes', dataUrl.length)
+      return { ok: true, path: 'D:\\fake\\shot.png' }
+    },
+    pin: (out) => {
+      report('pin callback rect', out.rect)
+      const el = document.createElement('img')
+      el.src = out.dataUrl
+      el.id = 'thumb'
+      document.getElementById('thumbs').appendChild(el)
+    },
+    insertText: (text) => report('insertText called with length', text.length),
+    onClose: (result) => {
+      if (result === null) { report('closed without result', true); return }
+      report('closed with rect', result.rect)
+      report('blob size', result.blob ? result.blob.size : -1)
+      const el = document.createElement('img')
+      el.src = result.dataUrl
+      el.id = 'thumb'
+      document.getElementById('thumbs').appendChild(el)
+      setTimeout(mount, 400)
+    },
+  })
+  window.__dshot = overlay
+  log('overlay mounted; canvas ' + overlay.canvas.width + 'x' + overlay.canvas.height +
+      ' css ' + overlay.canvas.style.width + ' x ' + overlay.canvas.style.height)
+}
+
+/** 合成鼠标事件驱动覆盖层（真画一遍，不走内部函数） */
+function dragOnCanvas(from, to, steps = 6) {
+  const c = overlay.canvas
+  const r = c.getBoundingClientRect()
+  const sx = r.width / c.width
+  const sy = r.height / c.height
+  const pt = (p) => ({ clientX: r.left + p[0] * sx, clientY: r.top + p[1] * sy })
+  c.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, ...pt(from) }))
+  for (let i = 1; i <= steps; i += 1) {
+    const p = [from[0] + (to[0] - from[0]) * i / steps, from[1] + (to[1] - from[1]) * i / steps]
+    document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, ...pt(p) }))
+  }
+  document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, ...pt(to) }))
+}
+
+function pickTool(id) {
+  const btn = document.querySelector('.dshot-bar [data-tool="' + id + '"]')
+  if (btn === null) { log('工具按钮找不到: ' + id); return false }
+  btn.click()
+  return true
+}
+
+document.getElementById('panel').addEventListener('click', async (ev) => {
+  const act = ev.target.dataset.act
+  if (!act) return
+  try {
+    if (act === 'reset') { mount(); log('重置完成') }
+    else if (act === 'select') { overlay.setSelection({ x: 200, y: 150, w: 600, h: 400 }); log('选区已设') }
+    else if (act === 'tools') {
+      const results = []
+      for (const t of ['rect', 'ellipse', 'arrow', 'pen', 'mosaic']) {
+        pickTool(t)
+        dragOnCanvas([260, 200], [560, 420], 5)
+        results.push(t)
+      }
+      pickTool('rect')
+      report('ops after tools', overlay.state.ops.map((o) => o.kind))
+    }
+    else if (act === 'compose') {
+      const out = await overlay.compose()
+      report('compose rect', out.rect)
+      report('compose blob bytes', out.blob ? out.blob.size : -1)
+    }
+    else if (act === 'full') {
+      overlay.setSelection(null)
+      const out = await overlay.compose()
+      report('full rect', out.rect)
+      report('full blob bytes', out.blob ? out.blob.size : -1)
+    }
+    else if (act === 'undo') {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }))
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }))
+      report('ops now', overlay.state.ops.length)
+    }
+    else if (act === 'ocr') { document.querySelector('.dshot-bar .dshot-btn[title="提取文字"]').click() }
+  } catch (error) {
+    log('ACTION ERROR ' + act + ': ' + (error && error.message))
+  }
+})
+
+window.addEventListener('error', (e) => log('PAGE ERROR: ' + e.message))
+</script>
+</body>
+</html>

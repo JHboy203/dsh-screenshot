@@ -1,0 +1,11 @@
+# dsh-screenshot bundle patch：把宿主半边挂进 profile。
+#
+# 这一行只负责「让包被扫描到」。按钮与标注界面在 client.js，由 client-modules
+# 经 /plugins 提供给浏览器。
+#
+# ⚠️ Desktop 的 Electron host 不消费 patchReload: live —— 宿主半边改完必须重启
+#    DSH Desktop（客户端半边刷新页面即可，它会重新拉 /plugins 的 client.js）。
+
+- insert:
+    - id: screenshot
+      name: dsh-screenshot

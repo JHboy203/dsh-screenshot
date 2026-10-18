@@ -1,0 +1,28 @@
+# 运行时产物（不入库）
+node_modules/
+.cache/
+.dsh-diag/
+out/
+report/
+dist/
+build/
+coverage/
+*.log
+*.bak-*
+.DS_Store
+Thumbs.db
+
+# 敏感文件（红线：绝不入库）
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+.npmrc
+.netrc
+configs/*-secret.json
+configs/*-config.json
