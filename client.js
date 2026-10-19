@@ -3186,7 +3186,7 @@ window.__ModuleLoader__.load({
 					target: target === undefined ? 'focused' : String(target),
 					instance: {
 						id: AI_BRIDGE.id,
-						build: 'R25',
+						build: 'R28',
 						born: AI_BRIDGE.born,
 						vw: window.innerWidth,
 						vh: window.innerHeight,
@@ -4106,7 +4106,7 @@ window.__ModuleLoader__.load({
 			//    所以给一个明确命名的钩子，而不是把内部状态散到 window 上。
 			window.__dshotDebug = {
 				/** 版本标记：AI 直连桥靠它判断"我改的这版到底加载了没有"（热重载有延迟）。 */
-				build: 'R25',
+				build: 'R28',
 				shot: shot,
 				prefs: prefs,
 				setPref: setPref,

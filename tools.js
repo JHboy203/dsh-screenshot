@@ -19,6 +19,7 @@
 import { capture, displays, imageStats, listWindows, toDataUrl } from './lib/shot.mjs'
 import { queueDeliver } from './lib/bus.mjs'
 import { gateRun, bridgeStatus, bridgeSend, bridgeResults, WORKSPACE } from './lib/devtools.mjs'
+import { runHealth } from './lib/health.mjs'
 
 /** 把任意值收敛成 lossless JSON（宿主对工具输出会做往返校验，undefined 会让整次调用失败）。 */
 function lossless(value) {
@@ -90,8 +91,66 @@ export function buildShotTools(deps = {}) {
 	const capFn = typeof deps.capture === 'function' ? deps.capture : capture
 	const dispFn = typeof deps.displays === 'function' ? deps.displays : displays
 	const statsFn = typeof deps.imageStats === 'function' ? deps.imageStats : imageStats
+	const healthFn = typeof deps.health === 'function' ? deps.health : runHealth
 
 	return [
+		/**
+		 * **换会话第一条命令**（R28）。
+		 *
+		 * 这个插件最容易骗人的地方不是功能，是"我改的代码到底生效了没有"：宿主半边改了要重启、
+		 * 抓屏助手不会自己重生、客户端热重载有延迟 —— 三条都不报错，只是**静默按旧代码办事**
+		 * （R25 就因此在线上留过一个"桥的假阴性"）。这个工具把"文件时间 vs 进程/实例时间"
+		 * 摆在一起，直接回答**要不要重启**。
+		 */
+		{
+			name: 'shot_health',
+			description:
+				'截图插件体检（换会话第一条命令）：两个常驻助手是否就绪、**宿主半边/抓屏助手/客户端分别是不是最新代码**、' +
+				'显示器与 DPI，最后给一句"要不要重启 DSH"和一个能照做的下一步。' +
+				'它靠"文件时间 vs 进程/实例时间"判断陈旧，所以能答出"我改了代码但没生效"这类只有重启才会消失的问题。只读。',
+			parameters: { type: 'object', properties: {} },
+			output: {
+				schema: {
+					type: 'object',
+					properties: {
+						ok: { type: 'boolean' },
+						needRestart: { type: 'boolean' },
+						verdict: { type: 'string' },
+						next: { type: 'string' },
+						hostStale: { type: 'array' },
+						helperStale: { type: 'array' },
+						clientStale: { type: 'boolean' },
+						shooter: { type: 'object' },
+						overlay: { type: 'object' },
+						instances: { type: 'array' },
+						displays: { type: 'object' },
+						uptimeMs: { type: 'number' },
+						error: { type: 'string' },
+						text: { type: 'string' },
+					},
+				},
+				render: TOOL_OUTPUT.render,
+			},
+			async execute() {
+				const res = await healthFn()
+				return {
+					ok: res.ok === true,
+					needRestart: res.needRestart === true,
+					verdict: String(res.verdict || ''),
+					next: String(res.next || ''),
+					hostStale: lossless(res.hostStale || []),
+					helperStale: lossless(res.helperStale || []),
+					clientStale: res.clientStale === true,
+					shooter: lossless(res.shooter || {}),
+					overlay: lossless(res.overlay || {}),
+					instances: lossless(res.instances || []),
+					displays: lossless(res.displays === null || res.displays === undefined ? {} : res.displays),
+					uptimeMs: Number(res.uptimeMs) || 0,
+					error: String(res.error || ''),
+					text: String(res.text || ''),
+				}
+			},
+		},
 		{
 			name: 'screenshot',
 			description:
