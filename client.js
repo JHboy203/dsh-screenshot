@@ -2387,6 +2387,121 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * 「截图」这一档的**唯一入口**：能出原生覆盖层就走原生，否则回落应用内那套。
+		 *
+		 * 为什么要有这个函数：这个判据以前在**三个地方各抄了一遍**（菜单动作、相机按钮、
+		 * 应用内热键），而热键那一份抄漏了 —— 于是"按钮是原生的、Ctrl+Alt+A 还是 DOM 的"。
+		 * 判据本身必须是**运行时**的：宿主没重启时 `shot.api.overlay` 根本不存在，自动回落。
+		 */
+		function doShotEntry() {
+			if (prefs().nativeOverlay !== false && shot.api !== null && typeof shot.api.overlay === 'function') return doNativePick()
+			return doCapture('shot')
+		}
+
+		/**
+		 * 原生取矩形：**只要一块屏幕区域**，不标注、不复制、不落盘。
+		 *
+		 * 长截图 / 提取文字 / 屏幕翻译的第一步都是「框一块屏幕区域」。这一步以前走 DOM
+		 * 覆盖层，而 DOM 覆盖层有两条硬伤（不是 bug，是坐标系决定的）：
+		 *   ① canvas 是整屏冻结帧的**原始像素**（`style.width = natural.w / dpr`），
+		 *      1920 屏在 125% 缩放下就是 1536 CSS px，而 DSH 窗口只有 ~1268 px
+		 *      ⇒ **能框到的只有屏幕左上角那一块**，目标应用在旁边就框不到；
+		 *   ② `position:fixed;inset:0` 只盖住 DSH 自己的窗口，DSH 不在前台就看不见。
+		 * 原生覆盖层是独立进程的全屏真窗口，坐标 = 虚拟屏幕物理像素，框哪都行 ——
+		 * 和「截图」那条路用的是同一个助手，只是请求里多一个 `regionOnly`。
+		 *
+		 * @param {'scrollRegion'|'ocr'|'translate'} kind
+		 */
+		async function doNativeRegion(kind, opts) {
+			const fallback = () => void doCapture(kind)
+			// 仅测试：请求里带 selfTest，助手会程序化框一块再返回 —— 沙箱里没有人能拖鼠标。
+			// 产品调用点**一律不传** opts，所以这条只在 AI 直连桥里出现。
+			const selfTest = opts !== undefined && opts !== null && opts.selfTest === true
+			if (shot.api === null || typeof shot.api.overlay !== 'function') {
+				postDiag('region-unavailable', { kind: kind, apiKeys: shot.api === null ? 0 : Object.keys(shot.api).length })
+				toast('原生覆盖层还没就绪（宿主需重启一次），先用应用内取区域', 3000)
+				return fallback()
+			}
+			shot.diag.capCalls += 1
+			toast(
+				kind === 'scrollRegion'
+					? '框住要滚动的区域 · Esc 取消（框完先去点一下那个窗口，它得在最前面）'
+					: '框住要识别的区域 · Esc 取消',
+				60000
+			)
+			const t0 = Date.now()
+			let res
+			try {
+				res = await shot.api.overlay(180, JSON.stringify(selfTest ? { regionOnly: true, selfTest: true } : { regionOnly: true }))
+			} catch (error) {
+				const msg = String((error && error.message) || error)
+				postDiag('region-call-failed', { kind: kind, error: msg })
+				toast('原生取区域失败，改用应用内取区域：' + msg, 3200)
+				return fallback()
+			}
+			// 老宿主（没重启）不认识 regionOnly，会照常进标注阶段并回 reason:'picked'
+			// + 剪贴板 + 落盘。矩形照样是对的，所以**接受它** —— 总比让用户白框一次好，
+			// 只是多写了一次剪贴板。
+			const picked = res && res.ok === true && Number(res.w) > 3 && Number(res.h) > 3
+			postDiag('region-result', {
+				kind: kind,
+				ok: picked,
+				reason: String((res && res.reason) || ''),
+				regionOnly: res ? res.regionOnly === true : false,
+				x: Number(res && res.x) || 0,
+				y: Number(res && res.y) || 0,
+				w: Number(res && res.w) || 0,
+				h: Number(res && res.h) || 0,
+				ms: Date.now() - t0,
+			})
+			if (picked) {
+				const rect = { x: Math.round(res.x), y: Math.round(res.y), w: Math.round(res.w), h: Math.round(res.h) }
+				if (kind === 'scrollRegion') {
+					void runLongSession(rect, { native: true })
+					return
+				}
+				void nativeRegionText(rect, kind)
+				return
+			}
+			if (res && res.cancelled === true) {
+				toast('已取消', 900)
+				return
+			}
+			const reason = String((res && (res.reason || res.error)) || 'unknown')
+			if (reason === 'no-helper' || reason === 'not-ready' || reason.indexOf('helper') >= 0) {
+				postDiag('region-fallback', { kind: kind, reason: reason })
+				toast('原生覆盖层不可用，改用应用内取区域', 2400)
+				return fallback()
+			}
+			toast('没有框到区域（' + reason + '）', 2200)
+		}
+
+		/**
+		 * 原生取到矩形之后「提取文字 / 屏幕翻译」：先按这块矩形抓一张，再走既有的
+		 * OCR 面板。抓出来的那张**就是这块区域本身**，所以交给 OCR 时 rect 从 (0,0) 起 ——
+		 * 别把屏幕坐标当成图片坐标传下去（那是 R19 那类"截到隔壁"的经典错法）。
+		 */
+		async function nativeRegionText(rect, kind) {
+			const rectText = [rect.x, rect.y, rect.w, rect.h].join(',')
+			toast('正在抓这块区域…', 60000)
+			let cap
+			try {
+				// hideSelf=1：这块区域是用户**在真实桌面上**框的，DSH 窗口可能正盖着它。
+				cap = await shot.api.cap('desktop', '1', 'screen', 0, rectText)
+			} catch (error) {
+				toast('抓取区域失败：' + String((error && error.message) || error))
+				return
+			}
+			if (!cap || cap.ok !== true) {
+				toast('抓取区域失败：' + ((cap && cap.error) || '未知错误'))
+				return
+			}
+			shot.lastShotId = cap.id
+			postDiag('region-cap', { kind: kind, id: cap.id, width: cap.width, height: cap.height })
+			void runTextKind({ rect: { x: 0, y: 0, w: Number(cap.width) || rect.w, h: Number(cap.height) || rect.h } }, kind)
+		}
+
+		/**
 		 * 把一张图交给覆盖层。
 		 * @param {{id:string, dataUrl:string, hidden?:boolean}} shotRes
 		 * @param {string} kind 'shot' | 'ocr' | 'translate' | 'scroll'
@@ -2455,8 +2570,10 @@ window.__ModuleLoader__.load({
 		 * 等于完全没工作。这正是用户报的「滚动截屏没效果，既不会自己滚，也不能我鼠标滚轮
 		 * 控制着滚」的根因。所以：客户端只负责**显示状态和收尾**，抓帧/比对/拼接全在宿主。
 		 */
-		async function runLongSession(rect) {
+		async function runLongSession(rect, opts) {
 			if (shot.api === null) return
+			// native = 这块矩形是原生覆盖层给的（虚拟屏幕物理像素，可能在任何显示器上）。
+			const native = opts !== undefined && opts !== null && opts.native === true
 			const rectText = [Math.round(rect.x), Math.round(rect.y), Math.round(rect.w), Math.round(rect.h)].join(',')
 			const mode = prefs().scrollMode === 'auto' ? 'auto' : 'manual'
 			let begin
@@ -2490,11 +2607,30 @@ window.__ModuleLoader__.load({
 			rootEl.append(frameEl, barEl)
 			document.body.appendChild(rootEl)
 
+			/**
+			 * 框线只是**指示**「将要截哪块」。rect 是**屏幕物理像素**，而 DOM 用的是视口
+			 * CSS 像素 ⇒ 必须换算，否则 125% 缩放下框线会大 25% 且整体偏移
+			 * （老代码直接把物理像素当 CSS 用；以前那条路框出来的区域必然在窗口内，
+			 *   所以这个错没人注意到，但它是错的）。
+			 * 区域整个落在 DSH 窗口之外时**不画**：画不出来就别画一条骗人的线，
+			 * 状态条里会给出真实坐标。原生取区域时这是常见情况（目标应用在别的窗口）。
+			 */
 			const place = () => {
-				frameEl.style.left = Math.round(rect.x) + 'px'
-				frameEl.style.top = Math.round(rect.y) + 'px'
-				frameEl.style.width = Math.round(rect.w) + 'px'
-				frameEl.style.height = Math.round(rect.h) + 'px'
+				const dpr = window.devicePixelRatio || 1
+				const left = rect.x / dpr - (window.screenX || 0)
+				const top = rect.y / dpr - (window.screenY || 0)
+				const vw = rect.w / dpr
+				const vh = rect.h / dpr
+				const inView = left >= -6 && top >= -6 && left + vw <= window.innerWidth + 6 && top + vh <= window.innerHeight + 6
+				if (!inView) {
+					frameEl.style.display = 'none'
+					return
+				}
+				frameEl.style.display = ''
+				frameEl.style.left = Math.round(left) + 'px'
+				frameEl.style.top = Math.round(top) + 'px'
+				frameEl.style.width = Math.round(vw) + 'px'
+				frameEl.style.height = Math.round(vh) + 'px'
 			}
 			place()
 
@@ -2613,7 +2749,8 @@ window.__ModuleLoader__.load({
 						hint.className = 'dshot-hk'
 						hint.textContent = mode === 'auto'
 							? '正在自己滚…' + (st.lastError ? '（' + st.lastError + '）' : '')
-							: '切到你要截的那个窗口，用你自己的滚轮滚 · 停手就接一帧（DSH 挡着会暂停）'
+							: (native ? '先点一下你要截的那个窗口（它得在最前面），再用滚轮滚 · 停手就接一帧'
+								: '切到你要截的那个窗口，用你自己的滚轮滚 · 停手就接一帧（DSH 挡着会暂停）')
 					}
 					if (st.lastError) postDiag('long-error', { error: String(st.lastError).slice(0, 120) })
 				} catch {}
@@ -2634,7 +2771,7 @@ window.__ModuleLoader__.load({
 					try {
 						await shot.api.scroll('', JSON.stringify({ session: 'cancel' }))
 					} catch {}
-					void runLongSession(rect)
+					void runLongSession(rect, native ? { native: true } : undefined)
 				}),
 				mk('＋', '手动再接一帧（不确定接没接上时用）', () => addFrame()),
 				mk('⤒', '重新从当前画面开始（丢掉已接的帧）', async () => {
@@ -2644,7 +2781,7 @@ window.__ModuleLoader__.load({
 					try {
 						await shot.api.scroll('', JSON.stringify({ session: 'cancel' }))
 					} catch {}
-					void runLongSession(rect)
+					void runLongSession(rect, native ? { native: true } : undefined)
 				}),
 				mk('✕', '取消长截图', () => cancel()),
 				mk('✓ 完成', '拼好并进入标注（热键再按一次也行）', () => done(), true)
@@ -2873,7 +3010,7 @@ window.__ModuleLoader__.load({
 					target: target === undefined ? 'focused' : String(target),
 					instance: {
 						id: AI_BRIDGE.id,
-						build: 'R19.4',
+						build: 'R20',
 						vw: window.innerWidth,
 						vh: window.innerHeight,
 						dpr: window.devicePixelRatio,
@@ -3094,14 +3231,14 @@ window.__ModuleLoader__.load({
 				} catch {}
 				shot.cover = null
 			}
-			if (act === 'ocr') void doCapture('ocr')
-			else if (act === 'translate') void doCapture('translate')
-			else if (act === 'scroll') void doCapture('scrollRegion')
-			else if (prefs().nativeOverlay !== false && shot.api !== null && typeof shot.api.overlay === 'function') {
-				// 截图这一档走**原生覆盖层**，和按钮同一条路。这才是 QQ 的用法：
-				// 全局热键在任何应用里按下，直接在真实桌面上框，不要求 DSH 在前台、也不要求它可见。
-				void doNativePick()
-			} else void doCapture('shot')
+			// 取区域那三步（提取文字 / 屏幕翻译 / 长截图）**也走原生覆盖层**：
+			// 它们的共同第一步是「框一块屏幕区域」，用 DOM 覆盖层就只能框 DSH 窗口内那块
+			// （canvas 是整屏原始像素、受窗口裁剪）。doNativeRegion 里带回落。
+			if (act === 'ocr') void doNativeRegion('ocr')
+			else if (act === 'translate') void doNativeRegion('translate')
+			else if (act === 'scroll') void doNativeRegion('scrollRegion')
+			// 截图这一档走**原生覆盖层**，和相机按钮、应用内热键**同一个入口**。
+			else void doShotEntry()
 		}
 
 		/**
@@ -3384,11 +3521,11 @@ window.__ModuleLoader__.load({
 				}),
 				item('Aa', '提取文字（离线 OCR）', hkOff ? '' : hk('ocr'), () => {
 					close()
-					void doCapture('ocr')
+					void doNativeRegion('ocr')
 				}),
 				item('⇕', '长截图（滚动拼接）', hkOff ? '' : hk('scroll'), () => {
 					close()
-					void doCapture('scrollRegion')
+					void doNativeRegion('scrollRegion')
 				})
 			)
 			const sep = document.createElement('div')
@@ -3454,7 +3591,7 @@ window.__ModuleLoader__.load({
 					}),
 					item('译', '屏幕翻译（OCR → 交给 DSH）', hkOff ? '' : hk('translate'), () => {
 						close()
-						void doCapture('translate')
+						void doNativeRegion('translate')
 					}),
 					sepEl(),
 					item('⌨', '全局热键：' + (prefs().hotkeys ? '已开启（DSH 外也能按）' : '关闭'), '', () => {
@@ -3636,13 +3773,9 @@ window.__ModuleLoader__.load({
 								if (typeof closer === 'function') closer()
 								return
 							}
-							// M1：能出原生覆盖层就走原生（那是一块能盖住整个桌面的真窗口），否则走应用内那套。
-							// 判据是**运行时**的 —— 宿主没重启时 `shot.api.overlay` 根本不存在，于是自动回落。
-							if (prefs().nativeOverlay !== false && shot.api !== null && typeof shot.api.overlay === 'function') {
-								void doNativePick()
-								return
-							}
-							void doCapture('shot')
+							// 能出原生覆盖层就走原生（那是一块能盖住整个桌面的真窗口），否则走应用内那套。
+							// 判据在 doShotEntry 里，三条入口共用一份，别再各抄一遍。
+							void doShotEntry()
 						},
 						onContextMenu: (ev) => {
 							ev.preventDefault()
@@ -3703,11 +3836,16 @@ window.__ModuleLoader__.load({
 			//    所以给一个明确命名的钩子，而不是把内部状态散到 window 上。
 			window.__dshotDebug = {
 				/** 版本标记：AI 直连桥靠它判断"我改的这版到底加载了没有"（热重载有延迟）。 */
-				build: 'R19.4',
+				build: 'R20',
 				shot: shot,
 				prefs: prefs,
 				setPref: setPref,
 				doCapture: doCapture,
+				// 原生那条路也要能从桥里驱动 —— 否则"改了客户端"只能靠静态断言。
+				// doNativeRegion(kind, {selfTest:true}) 会真的走 overlay(regionOnly) ，
+				// 因为它绕开的只是"人手拖框"那一步，不是任何一段代码。
+				doNativeRegion: doNativeRegion,
+				doShotEntry: doShotEntry,
 				openMenu: openMenu,
 				pinImage: pinImage,
 				toast: toast,
@@ -3772,10 +3910,10 @@ window.__ModuleLoader__.load({
 				const k = String(ev.key || '').toLowerCase()
 				if (k === 'a') {
 					ev.preventDefault()
-					void doCapture('shot')
+					void doShotEntry()
 				} else if (k === 'o') {
 					ev.preventDefault()
-					void doCapture('ocr')
+					void doNativeRegion('ocr')
 				}
 			}, true)
 

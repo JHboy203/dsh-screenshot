@@ -34,6 +34,14 @@ const WITH_PICK = argv.includes('--pick') || argv.includes('--all')
 // 必须在 import 之前改道：CACHE_DIR / SHOTS_DIR / REC_DIR 都是模块加载时读的常量。
 process.env.DSH_SHOT_CACHE = path.join(LAB, 'cache')
 process.env.DSH_SHOT_DIR = path.join(LAB, 'shots')
+/**
+ * 覆盖层的请求目录也必须改道，而且这条**不是洁癖**：
+ * DSH 应用自己常驻着一个覆盖层助手（插件 init 起的那一个），它也盯着
+ * `.cache/overlay` 里的 `ovlreq-*.json`。两个助手抢同一个目录时，**先读到的那一个**
+ * 会去开窗、写结果 —— 于是本脚本问的是自己的助手，窗口却是别人开的，
+ * 表现是莫名其妙的 `reason=esc` / 超时，而且随应用是否在跑而变（曾整组假红）。
+ */
+process.env.DSH_OVERLAY_DIR = path.join(LAB, 'overlay')
 
 const shot = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'shot.mjs')).href)
 const shooter = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'shooter.mjs')).href)
@@ -810,6 +818,54 @@ log('[9] 常驻抓屏助手（shooter）')
 		const gone3 = await waitGone(last)
 		check('9.6 stopShooter 幂等且 OS 进程真的没了', idempotent && gone3 >= 0, `pid=${last} gone in ${gone3}ms`)
 	}
+}
+
+/* ─────────────────── 10 原生覆盖层：regionOnly（只取矩形） ───────────────────
+ *
+ * 长截图 / 提取文字 / 屏幕翻译的第一步都是「框一块屏幕区域」。它们以前用 DOM 覆盖层，
+ * 而 DOM 覆盖层的 canvas 是整屏原始像素、被 DSH 窗口裁剪 ⇒ **只能框到屏幕左上角一块**。
+ * 现在统一走原生助手，请求里带 regionOnly：只要矩形，不标注 / 不写剪贴板 / 不落盘。
+ *
+ * 这一组刻意**从服务类进**（svc.overlay），而不是直接调 overlayPick：
+ * 客户端真正调到的是这一层，少透传一个字段整条改动就是白改（R19 的教训）。
+ * 同时验**反向**：不带 regionOnly 时必须还是老行为（有剪贴板、有 PNG），
+ * 否则"顺手把截图也改成不落盘了"这种回归没人发现。
+ */
+{
+	const overlay = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'overlay.mjs')).href)
+	overlay.stopOverlayHost()
+	await sleep(300)
+	const boot = overlay.startOverlayHost()
+	let readyMs = -1
+	const tReady = Date.now()
+	for (let i = 0; i < 200; i += 1) {
+		if (overlay.overlayStatus().ready === true) {
+			readyMs = Date.now() - tReady
+			break
+		}
+		await sleep(80)
+	}
+	check('10.0 覆盖层助手起得来并完成 ready 握手', boot.ok === true && readyMs >= 0, `pid=${boot.pid} ready in ${readyMs}ms dir=${overlay.OVERLAY_DIR}`)
+
+	const regionPng = path.join(LAB, 'overlay-region-should-not-exist.png')
+	try { fs.unlinkSync(regionPng) } catch {}
+	const region = await svc.overlay(20, JSON.stringify({ regionOnly: true, selfTest: true, png: regionPng }))
+	check('10.1 服务类把 regionOnly 透传给助手', region.ok === true && region.regionOnly === true, `ok=${region.ok} regionOnly=${region.regionOnly} reason=${region.reason}`)
+	check('10.2 regionOnly 回的矩形可用（320x240）', Number(region.w) === 320 && Number(region.h) === 240, `${region.w}x${region.h} @ ${region.x},${region.y}`)
+	check('10.3 regionOnly 不写剪贴板（别顶掉用户复制的东西）', region.clip === false, `clip=${region.clip}`)
+	check('10.4 regionOnly 不落盘（给了路径也不写）', region.png === '' && fs.existsSync(regionPng) === false, `png='${region.png}' exists=${fs.existsSync(regionPng)}`)
+
+	const pickPng = path.join(LAB, 'overlay-pick.png')
+	try { fs.unlinkSync(pickPng) } catch {}
+	const picked = await svc.overlay(20, JSON.stringify({ selfTest: true, png: pickPng }))
+	check('10.5 不带 regionOnly 仍是标注模式（有剪贴板 + 有 PNG）',
+		picked.ok === true && picked.regionOnly === false && picked.clip === true && fs.existsSync(pickPng),
+		`ok=${picked.ok} regionOnly=${picked.regionOnly} clip=${picked.clip} png=${fs.existsSync(pickPng)}`)
+
+	check('10.6 两次框选之后助手仍然活着（一次失败不带死整条链）', overlay.overlayStatus().alive === true, `alive=${overlay.overlayStatus().alive} calls=${overlay.overlayStatus().calls}`)
+	overlay.stopOverlayHost()
+	await sleep(1200)
+	check('10.7 收尾干净（OS 进程真的没了）', overlay.overlayStatus().alive === false, `alive=${overlay.overlayStatus().alive}`)
 }
 
 /* ─────────────────── 收尾 ─────────────────── */

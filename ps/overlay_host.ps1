@@ -166,6 +166,14 @@ public class DshOverlayForm : Form {
   public bool Pinned = false;
   public long Repaints = 0;
 
+  // RegionOnly: the caller wants the rectangle and nothing else (long screenshot / OCR /
+  // translate all start with "frame a piece of the screen"). No annotate phase, no
+  // clipboard write, no PNG -- pressing Enter on a picture nobody asked for is just waste.
+  // Flipped by FinishSelection() the same way a normal drag flips into phase 1, so the
+  // path being exercised is the real one.
+  public bool RegionOnly = false;
+  public bool RegionPicked = false;
+
   private const int BtnW = 64;
   private const int BtnH = 26;
   private const int BtnGap = 6;
@@ -641,9 +649,7 @@ public class DshOverlayForm : Form {
     dragging = false;
 
     if (phase == 0) {
-      if (sel.Width < 6 || sel.Height < 6) { SetSel(Rectangle.Empty); return; }
-      phase = 1;
-      Invalidate();
+      FinishSelection();
       return;
     }
 
@@ -742,6 +748,13 @@ public class DshOverlayForm : Form {
       DumpForm(".select");
     }
     SetSel(new Rectangle(200, 150, 320, 240));
+    if (RegionOnly) {
+      // Region-only requests never reach the annotate phase. Going through
+      // FinishSelection() (not a hand-written Close) is the point: the test then proves
+      // the SAME branch a real mouse-up takes.
+      FinishSelection();
+      return;
+    }
     phase = 1;
     DshShape r = new DshShape(0);
     r.A = new Point(220, 170);
@@ -781,6 +794,15 @@ public class DshOverlayForm : Form {
     el.B = new Point(470, 372);
     shapes.Add(el);
     DumpForm(".annotate");
+    Invalidate();
+  }
+
+  // The one place a selection becomes "done". Both the real mouse-up and the self test
+  // call it, so the test exercises the same transition the user does.
+  public void FinishSelection() {
+    if (sel.Width < 6 || sel.Height < 6) { SetSel(Rectangle.Empty); return; }
+    if (RegionOnly) { RegionPicked = true; Close(); return; }
+    phase = 1;
     Invalidate();
   }
 
@@ -936,7 +958,7 @@ while ($true) {
 
   $resFile = Join-Path $Dir ('ovlres-' + $callTag + '.json')
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  $res = @{ ok = $false; cancelled = $false; x = 0; y = 0; w = 0; h = 0; clip = $false; png = ''; ms = 0; dpi = $script:dpiMode; screenW = $vs.Width; screenH = $vs.Height; capMs = 0; repaint = 0; shapes = 0; labelsCount = 0; pinned = $false; reason = ''; error = '' }
+  $res = @{ ok = $false; cancelled = $false; x = 0; y = 0; w = 0; h = 0; clip = $false; png = ''; ms = 0; dpi = $script:dpiMode; screenW = $vs.Width; screenH = $vs.Height; capMs = 0; repaint = 0; shapes = 0; labelsCount = 0; pinned = $false; regionOnly = $false; reason = ''; error = '' }
 
   $timeoutSec = 120
   if ($null -ne $req.timeoutSec) { $timeoutSec = [int]$req.timeoutSec }
@@ -990,6 +1012,8 @@ while ($true) {
     }
     if ($null -ne $req.formShot) { $form.FormShotPath = [string]$req.formShot }
     if ($null -ne $req.hint) { $form.Hint = [string]$req.hint }
+    # Region-only: the rectangle is the whole deliverable (long screenshot / OCR / translate).
+    if ($req.regionOnly -eq $true) { $form.RegionOnly = $true }
     $form.Bounds = New-Object System.Drawing.Rectangle -ArgumentList $vs.X, $vs.Y, $vs.Width, $vs.Height
     $form.Text = 'dsh-shot-overlay'
 
@@ -1010,7 +1034,15 @@ while ($true) {
       $stimer.Interval = 900
       $stimer.Add_Tick({
         $stimer.Stop()
-        try { $script:ovForm.RunSelfTest(); Start-Sleep -Milliseconds 200; if ($req.pinTest -eq $true) { $script:ovForm.PinNow() } else { $script:ovForm.ConfirmNow() } } catch { Log ('selftest failed: ' + $_.Exception.Message) }
+        try {
+          $script:ovForm.RunSelfTest()
+          Start-Sleep -Milliseconds 200
+          # Region-only closes the form from inside RunSelfTest (it drives the real
+          # transition), so there is nothing left to confirm or pin.
+          if ($req.regionOnly -ne $true) {
+            if ($req.pinTest -eq $true) { $script:ovForm.PinNow() } else { $script:ovForm.ConfirmNow() }
+          }
+        } catch { Log ('selftest failed: ' + $_.Exception.Message) }
       })
       $script:ovSTimer = $stimer
       $form.Add_Shown({ $script:ovSTimer.Start() })
@@ -1021,7 +1053,20 @@ while ($true) {
     $res.repaint = [int]$form.Repaints
     $res.shapes = [int]$form.ShapeCount
 
-    if ($form.Cancelled) {
+    if ($form.RegionPicked) {
+      # Region-only: hand back the rectangle. Deliberately no Clipboard::SetImage and no
+      # PNG -- the caller is about to grab this area itself, and a stray screenshot in the
+      # clipboard would clobber whatever the user had copied.
+      $selRect = $form.Selection
+      $res.ok = $true
+      $res.regionOnly = $true
+      $res.reason = 'region'
+      $res.x = ($vs.X + $selRect.X)
+      $res.y = ($vs.Y + $selRect.Y)
+      $res.w = $selRect.Width
+      $res.h = $selRect.Height
+      Log ('region ' + $selRect.Width + 'x' + $selRect.Height + ' at ' + $res.x + ',' + $res.y)
+    } elseif ($form.Cancelled) {
       $res.cancelled = $true
       $res.reason = 'esc'
     } elseif ($form.Pinned) {

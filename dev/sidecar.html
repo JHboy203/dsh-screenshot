@@ -33,7 +33,7 @@
 <script>
 const logEl = document.getElementById('log')
 const log = (m) => { logEl.textContent += m + '\n' }
-const S = window.__sidecar = { step: 'boot', errors: [], capCalls: [], saveCalls: [], slotRegs: [] }
+const S = window.__sidecar = { step: 'boot', errors: [], capCalls: [], saveCalls: [], slotRegs: [], overlayCalls: [], scrollCalls: [] }
 window.addEventListener('error', (e) => S.errors.push('error: ' + String(e.message)))
 window.addEventListener('unhandledrejection', (e) =>
   S.errors.push('reject: ' + String((e.reason && e.reason.message) || e.reason)))
@@ -105,17 +105,51 @@ window.__ModuleLoader__ = { load(config) { captured = config } }
 
 /* ── 桩 ctx（remote 必须返回 typert 外层 {ok,value}，unwrap 只认这个）── */
 const wrapped = (value) => ({ ok: true, value })
+/**
+ * 原生覆盖层的桩。**两种形态都复刻**，因为它们返回的东西不同：
+ *   regionOnly:true  → 只有矩形（长截图 / OCR / 翻译要的）
+ *   regionOnly:false → 框完进标注阶段、Enter 之后 clip/png 都有（截图要的）
+ * 客户端就是靠这两个字段分辨"助手走的是哪条路"，所以桩必须像真的一样给出它们。
+ * 矩形故意给一个**不在 (0,0) 且比截屏大**的位置：正是"目标应用在 DSH 窗口之外"那种情况。
+ */
+const REGION = { x: 1200, y: 300, w: 640, h: 480 }
 const shotRemote = {
-  cap: async (mode, hide, method) => {
-    S.capCalls.push({ mode, hide, method })
+  cap: async (mode, hide, method, hwnd, rect) => {
+    S.capCalls.push({ mode, hide, method, rect: rect === undefined ? null : rect })
     return wrapped({ ok: true, id: 'shot-1', dataUrl: fakeShot, width: 400, height: 300, path: 'shots/shot-1.png', mime: 'image/png', method: method || 'screen', bytes: 4096 })
+  },
+  overlay: async (timeout, opts) => {
+    let parsed = {}
+    try { parsed = JSON.parse(opts || '{}') } catch {}
+    S.overlayCalls.push({ timeout: timeout === undefined ? null : timeout, opts: parsed })
+    if (parsed.regionOnly === true) {
+      return wrapped({ ok: true, cancelled: false, x: REGION.x, y: REGION.y, w: REGION.w, h: REGION.h, clip: false, png: '', ms: 900, regionOnly: true, reason: 'region', error: '' })
+    }
+    return wrapped({ ok: true, cancelled: false, x: 40, y: 40, w: 320, h: 240, clip: true, png: 'shots/shot-native.png', ms: 1200, regionOnly: false, reason: 'picked', error: '' })
   },
   ocr: async () => wrapped({ ok: true, text: '假的 OCR 结果', lines: 1 }),
   record: async () => wrapped({ ok: true, state: 'idle' }),
-  scroll: async () => wrapped({ ok: true, id: 'shot-2', dataUrl: fakeShot, width: 400, height: 300 }),
+  scroll: async (rect, opts) => {
+    let parsed = {}
+    try { parsed = JSON.parse(opts || '{}') } catch {}
+    S.scrollCalls.push({ rect: rect === undefined ? null : rect, opts: parsed })
+    // begin 必须带 active（客户端靠它分辨新老宿主），否则会走"要重启"那条提示。
+    if (parsed.session === 'begin') return wrapped({ ok: true, active: true, frames: 1, mode: parsed.mode || 'manual', stopReason: '', error: '' })
+    if (parsed.session === 'end') return wrapped({ ok: true, active: false, id: 'shot-long', dataUrl: fakeShot, width: 400, height: 900, frames: 3, stopReason: '', error: '' })
+    return wrapped({ ok: true, active: true, frames: 2, stopReason: '', error: '' })
+  },
   save: async (dataUrl, name) => { S.saveCalls.push(String(name)); return wrapped({ ok: true, path: 'shots/' + name + '.png', dir: 'shots' }) },
   list: async () => wrapped({ ok: true, items: [] }),
-  status: async () => wrapped({ ok: true, shots: 0 })
+  status: async () => wrapped({ ok: true, shots: 0 }),
+  /**
+   * 宿主→客户端的动作通道（全局热键就是从这里回来的）。
+   * 试验台用它驱动"热键按下"，比直接调内部函数更接近真机 —— 走的全是真代码。
+   */
+  poll: async () => {
+    const invoke = S.nextInvoke || ''
+    S.nextInvoke = ''
+    return wrapped({ ok: true, seq: (S.pollSeq = (S.pollSeq || 0) + 1), invoke: invoke, hotkeys: {} })
+  }
 }
 function makeScope(which) {
   const slots = {
@@ -157,8 +191,9 @@ async function main() {
   await sleep(2900)                       // 等开机快照（顺带验 shot.api.save 接线）
   S.saveCallsAfterBoot = S.saveCalls.slice()
 
-  /* ① 热键 → 抓屏 → 覆盖层 */
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, altKey: true, bubbles: true, cancelable: true }))
+  /* ① 抓屏 → 覆盖层。**走显式入口**：热键这一档现在优先原生（见 ④），
+        所以 DOM 那条回落路要用 __dshScreenshot.capture() 直接驱动 —— 两条路都得验。 */
+  window.__dshScreenshot.capture()
   await sleep(600)
   S.overlayRoot = !!document.querySelector('.dshot-root')
   S.overlayNodes = document.querySelectorAll('.dshot-root *').length
@@ -193,6 +228,72 @@ async function main() {
     overlayClosed: !document.querySelector('.dshot-root'),
     toasts: Array.from(document.querySelectorAll('.dshot-toast')).map((el) => String(el.textContent || '').slice(0, 60))
   }
+  /* ④ 热键 Ctrl+Alt+A → **原生覆盖层**（不再先截一张再盖 DOM 平面）。
+        断言只看两件事：overlay 真的被调了、而且**没带 regionOnly**（这一档要标注）。 */
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, altKey: true, bubbles: true, cancelable: true }))
+  await sleep(500)
+  const callShot = S.overlayCalls[0] || null
+  S.nativeShot = {
+    calls: S.overlayCalls.length,
+    annotateMode: !!(callShot && callShot.opts && callShot.opts.regionOnly !== true),
+    labelsAreChinese: !!(callShot && Array.isArray(callShot.opts.labels) && callShot.opts.labels[0] === '矩形'),
+    hintIsChinese: !!(callShot && typeof callShot.opts.hint === 'string' && callShot.opts.hint.indexOf('复制') >= 0),
+    domOverlay: !!document.querySelector('.dshot-root'),
+    toasts: Array.from(document.querySelectorAll('.dshot-toast')).map((el) => String(el.textContent || '').slice(0, 60))
+  }
+
+  /* ⑤ 热键 Ctrl+Alt+O → 原生取矩形（regionOnly）→ 按那块矩形抓 → OCR 面板。
+        这是本轮改动的核心：区域型功能不再受"只能框 DSH 窗口内那块"的限制。 */
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'o', ctrlKey: true, altKey: true, bubbles: true, cancelable: true }))
+  await sleep(1400)
+  const callRegion = S.overlayCalls[1] || null
+  const capRect = (S.capCalls || []).filter((c) => c.rect !== null).map((c) => c.rect)
+  S.nativeRegion = {
+    calls: S.overlayCalls.length,
+    regionOnly: !!(callRegion && callRegion.opts && callRegion.opts.regionOnly === true),
+    capRect: capRect.length > 0 ? capRect[capRect.length - 1] : null,
+    textPanel: !!document.querySelector('.dshot-textpanel'),
+    textPanelBody: (document.querySelector('.dshot-textpanel-body') || {}).value || '',
+    domOverlay: !!document.querySelector('.dshot-root'),
+    errors: S.errors.slice()
+  }
+  // 关掉文本面板，别让它挡住后面的长截图断言
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+
+  /* ⑥ 宿主热键 → 长截图：**整条链**都走真的 —— poll.invoke='scroll' →
+        doNativeRegion('scrollRegion') → runLongSession → scroll({session:'begin'})。
+        断言：begin 拿到的 rect 必须**正好是原生给的那块**（1200,300,640,480），
+        而不是以前那种"截全屏再让用户在 DSH 里框"的坐标。 */
+  S.scrollCalls = []
+  S.nextInvoke = 'scroll'
+  await sleep(1600)
+  const begin = (S.scrollCalls || []).find((c) => c.opts && c.opts.session === 'begin') || null
+  const bar = document.querySelector('.dshot-longbar')
+  const doneBtn = bar === null ? null : Array.from(bar.querySelectorAll('button')).find((b) => String(b.textContent).indexOf('完成') >= 0)
+  S.nativeScroll = {
+    regionCall: (S.overlayCalls[2] || {}).opts || null,
+    beginRect: begin === null ? null : begin.rect,
+    beginMode: begin === null ? null : begin.opts.mode,
+    barShown: bar !== null,
+    // 原生矩形在 (1200,300)，DSH 视口显然盖不住 -> 框线必须**不画**（画了就是骗人）
+    frameHidden: (() => {
+      const f = document.querySelector('.dshot-longframe')
+      return f === null ? null : f.style.display === 'none'
+    })(),
+    hasDone: doneBtn !== undefined && doneBtn !== null
+  }
+  if (doneBtn) {
+    doneBtn.click()
+    await sleep(900)
+  }
+  S.nativeScroll.afterDone = {
+    endCalled: (S.scrollCalls || []).some((c) => c.opts && c.opts.session === 'end'),
+    overlayOfLongImage: !!document.querySelector('.dshot-root'),
+    errors: S.errors.slice()
+  }
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  await sleep(200)
+
   S.step = 'done'
   log('step: ' + S.step + '   bundle: ' + S.bundleId)
   log('mountOpts: ' + JSON.stringify(S.mountOpts))
@@ -203,6 +304,11 @@ async function main() {
   log('overlay: root=' + S.overlayRoot + ' canvas=' + S.hasCanvas + ' nodes=' + S.overlayNodes)
   log('afterDrag: ' + JSON.stringify(S.afterDrag))
   log('deliver: ' + JSON.stringify(S.deliver))
+  log('nativeShot: ' + JSON.stringify(S.nativeShot))
+  log('nativeRegion: ' + JSON.stringify(S.nativeRegion))
+  log('nativeScroll: ' + JSON.stringify(S.nativeScroll))
+  log('scrollCalls: ' + JSON.stringify(S.scrollCalls))
+  log('overlayCalls: ' + JSON.stringify(S.overlayCalls))
   log('errors: ' + JSON.stringify(S.errors))
 }
 main().catch((e) => { S.step = 'threw'; S.errors.push('main: ' + String((e && e.message) || e)); log('THREW: ' + e) })
