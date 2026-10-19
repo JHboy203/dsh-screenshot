@@ -581,17 +581,28 @@ let recPath = ''
 	}
 }
 
-/* ─────────────────── 6. 老路径不回归 ─────────────────── */
+/* ─────────────────── 6. 老的一次性路径已删除（R26） ─────────────────── */
 
-log('[6] 老自动路径 scroll(rect,"")')
+log('[6] 老自动路径 scroll(rect,"") —— R26 起是**明确拒绝**')
 {
-	// 用固定矩形：这条验的是"老调用点没被弄断"，跟我的 lab 窗口在不在最上面无关 ——
-	// 之前用 RECT，屏幕被用户全屏占满时它会变成空串，于是这条会假失败。
+	/**
+	 * 这一条以前验的是"老路径还能跑出 ≥2 帧"。R26 把那条实现删了（backlog ③：没有守卫、
+	 * 每帧 spawn 三个进程、一个测试都没碰过），所以现在要验的是**新契约**：
+	 * 没有 session 的调用立刻拿到一句能读懂的错误，而不是偷偷跑另一套长截图。
+	 *
+	 * 为什么这比"删掉测试"好：删除本身也要有护栏 —— 否则下次谁把兼容分支加回来，
+	 * 没有任何东西会响。
+	 */
 	const res = await svc.scroll(FIXED_RECT, JSON.stringify({ maxFrames: 4, settleMs: 300 }))
 	check(
-		'6 scroll 老路径（无 session 字段）',
-		res.ok === true && Number(res.frames) >= 2 && Number(res.height) > 0,
-		`frames=${res.frames} ${res.width}x${res.height} id=${res.id} path=${res.path} dataUrl=${kb(String(res.dataUrl).length)} err=${res.error}`
+		'6.1 没有 session 的调用被明确拒绝（不再偷偷跑另一条实现）',
+		res.ok === false && /session/.test(String(res.error)) && Number(res.frames) === 0,
+		`ok=${res.ok} error="${String(res.error).slice(0, 80)}" frames=${res.frames}`
+	)
+	check(
+		'6.2 拒绝是即时的（没有真的去抓屏 / 滚动 / 落盘）',
+		Number(res.width) === 0 && Number(res.height) === 0 && String(res.path) === '' && String(res.dataUrl) === '',
+		`w=${res.width} h=${res.height} path="${res.path}" dataUrl=${kb(String(res.dataUrl).length)}`
 	)
 }
 

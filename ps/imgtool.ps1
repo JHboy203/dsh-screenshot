@@ -1,12 +1,17 @@
-# dsh-screenshot - image toolbox (crop / scale / info), .NET System.Drawing only.
+# dsh-screenshot - image toolbox (crop / scale / info / stats), .NET System.Drawing only.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File imgtool.ps1 -Op crop  -In a.png -Out b.png -Rect 10,20,300,200
 #   powershell ... -File imgtool.ps1 -Op scale -In a.png -Out b.jpg -MaxWidth 2560 -Quality 92
 #   powershell ... -File imgtool.ps1 -Op info  -In a.png            (prints JSON)
+#   powershell ... -File imgtool.ps1 -Op stats -In a.png            (mean luma + black ratio)
+#
+# Why `stats`: "the capture came out black" is the classic SILENT failure of CopyFromScreen
+# (an off-screen / clamped source quietly yields black). Geometry alone cannot tell you that,
+# so the clamp probe in tools.js asks for this number instead of trusting the size.
 #
 # ASCII only: the console is GBK. Never prints Chinese.
 param(
-  [Parameter(Mandatory=$true)][ValidateSet('crop','scale','info')][string]$Op,
+  [Parameter(Mandatory=$true)][ValidateSet('crop','scale','info','stats')][string]$Op,
   [Parameter(Mandatory=$true)][string]$In,
   [string]$Out = '',
   [string]$Rect = '',
@@ -21,6 +26,36 @@ $src = [System.Drawing.Bitmap]::FromFile([System.IO.Path]::GetFullPath($In))
 try {
   if ($Op -eq 'info') {
     Write-Output ("{{""width"":{0},""height"":{1}}}" -f $src.Width, $src.Height)
+    return
+  }
+
+  if ($Op -eq 'stats') {
+    # Sample every Nth pixel on a fixed grid: a 1920x1080 frame is ~2M pixels and GetPixel is
+    # slow (~1us each), so 32x32 samples is plenty to answer "is this whole image black".
+    $stepX = [Math]::Max(1, [int][Math]::Floor($src.Width / 32))
+    $stepY = [Math]::Max(1, [int][Math]::Floor($src.Height / 32))
+    $n = 0
+    $sum = 0.0
+    $dark = 0
+    $minL = 255.0
+    $maxL = 0.0
+    for ($y = 0; $y -lt $src.Height; $y += $stepY) {
+      for ($x = 0; $x -lt $src.Width; $x += $stepX) {
+        $c = $src.GetPixel($x, $y)
+        $l = (($c.R * 299) + ($c.G * 587) + ($c.B * 114)) / 1000.0
+        $sum += $l
+        if ($l -lt 8) { $dark += 1 }
+        if ($l -lt $minL) { $minL = $l }
+        if ($l -gt $maxL) { $maxL = $l }
+        $n += 1
+      }
+    }
+    $mean = 0.0
+    if ($n -gt 0) { $mean = $sum / $n }
+    $blackPct = 0.0
+    if ($n -gt 0) { $blackPct = [Math]::Round(100.0 * $dark / $n, 2) }
+    Write-Output ("{{""width"":{0},""height"":{1},""samples"":{2},""meanLuma"":{3},""minLuma"":{4},""maxLuma"":{5},""blackPct"":{6}}}" -f `
+      $src.Width, $src.Height, $n, [Math]::Round($mean, 2), [Math]::Round($minL, 2), [Math]::Round($maxL, 2), $blackPct)
     return
   }
 

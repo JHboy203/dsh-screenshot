@@ -16,7 +16,7 @@
  * 让 capture.ps1 在自己的进程里解析 —— Node 这边不是 DPI-aware，自己算会差 1.25 倍。
  */
 
-import { capture, listWindows, toDataUrl } from './lib/shot.mjs'
+import { capture, displays, imageStats, listWindows, toDataUrl } from './lib/shot.mjs'
 import { queueDeliver } from './lib/bus.mjs'
 import { gateRun, bridgeStatus, bridgeSend, bridgeResults, WORKSPACE } from './lib/devtools.mjs'
 
@@ -88,6 +88,8 @@ function rectOf(args) {
 export function buildShotTools(deps = {}) {
 	const listFn = typeof deps.listWindows === 'function' ? deps.listWindows : listWindows
 	const capFn = typeof deps.capture === 'function' ? deps.capture : capture
+	const dispFn = typeof deps.displays === 'function' ? deps.displays : displays
+	const statsFn = typeof deps.imageStats === 'function' ? deps.imageStats : imageStats
 
 	return [
 		{
@@ -363,6 +365,127 @@ export function buildShotTools(deps = {}) {
 					ms: res.ms,
 					error: res.error,
 					text: res.text,
+				}
+			},
+		},
+		/**
+		 * 显示器 / DPI / 负坐标体检（R26）。
+		 *
+		 * 为什么做成工具：整条抓屏链路按"虚拟屏幕 + 物理像素"写，而**这台机器只有一块
+		 * 125% 屏** —— 单屏上写错也看不出来。真正会翻车的是：第二块屏在负坐标方向、
+		 * 混合 DPI、窗口横跨两块屏。这个工具把这些事实与**越界矩形的实测**一起给你，
+		 * 于是"插上第二块屏之后跑一条命令"就有结论。
+		 */
+		{
+			name: 'shot_displays',
+			description:
+				'显示器/DPI/虚拟屏幕体检（只读）+ 越界矩形抓屏实测：给出虚拟屏幕矩形、每块屏的坐标与 DPI、' +
+				'是否有负坐标原点/混合 DPI、当前前台窗口与光标；再用两块**故意越界**的矩形各抓一张，' +
+				'报出实际落到的尺寸与像素统计（blackPct 区分"被正确裁剪"和"静默黑图"）。' +
+				'接第二块显示器或改缩放比例之后跑它，就是多屏路径的验收。',
+			parameters: {
+				type: 'object',
+				properties: {
+					probe: { type: 'boolean', description: '是否跑越界抓屏实测（默认 true）。false = 只报显示器事实。' },
+				},
+			},
+			output: {
+				schema: {
+					type: 'object',
+					properties: {
+						ok: { type: 'boolean' },
+						monitorCount: { type: 'number' },
+						virtual: { type: 'object' },
+						monitors: { type: 'array' },
+						negativeOrigin: { type: 'boolean' },
+						mixedDpi: { type: 'boolean' },
+						foreground: { type: 'object' },
+						probes: { type: 'array' },
+						error: { type: 'string' },
+						text: { type: 'string' },
+					},
+				},
+				render: TOOL_OUTPUT.render,
+			},
+			async execute(args) {
+				const raw = args !== null && typeof args === 'object' ? args : {}
+				const info = await dispFn()
+				if (info.ok !== true) {
+					return { ok: false, monitorCount: 0, virtual: {}, monitors: [], negativeOrigin: false, mixedDpi: false, foreground: {}, probes: [], error: info.error || 'displays failed', text: '显示器体检失败：' + (info.error || '未知错误') }
+				}
+				const v = info.virtual || { left: 0, top: 0, width: 0, height: 0 }
+				const lines = [
+					'显示器 ' + info.monitorCount + ' 台 · 虚拟屏幕 ' + v.width + '×' + v.height + ' @ ' + v.left + ',' + v.top +
+						(info.negativeOrigin ? ' · **负坐标原点**（多屏 / 左上屏）' : '') +
+						(info.mixedDpi ? ' · **混合 DPI**' : ''),
+					...info.monitors.map((m, i) => `  #${i + 1} ${m.w}×${m.h} @ ${m.l},${m.t} · DPI ${m.dpiX}${m.dpiX > 0 ? '（' + Math.round((m.dpiX / 96) * 100) + '%）' : ''}`),
+					info.foreground && info.foreground.ok
+						? `  前台窗口：${String(info.foreground.title).slice(0, 40)} ${info.foreground.w}×${info.foreground.h} @ ${info.foreground.x},${info.foreground.y}`
+						: '',
+				].filter((l) => l !== '')
+
+				const probes = []
+				if (raw.probe !== false) {
+					const y = Number(v.top) + 100
+					const h = Math.max(60, Math.min(300, Number(v.height) - 200))
+					// ① 左边越界：起点在虚拟屏幕左外 200px、宽 400 ⇒ 期望被裁到 200
+					// ② 右边越界：起点离右边缘 200px、宽 400 ⇒ 同样期望 200
+					// 这两种正是"多屏负坐标"/"跨屏取区域"会走到的裁剪分支。
+					const cases = [
+						{ name: 'left-out', x: Number(v.left) - 200, y, w: 400, h },
+						{ name: 'right-out', x: Number(v.left) + Number(v.width) - 200, y, w: 400, h },
+					]
+					for (const c of cases) {
+						const rect = `${c.x},${c.y},${c.w},${c.h}`
+						const cap = await capFn({ mode: 'desktop', rect, noRestore: true, timeoutMs: 30_000 })
+						let stats = { ok: false, width: 0, height: 0, meanLuma: 0, blackPct: 100, error: '' }
+						if (cap.ok !== false && cap.path) {
+							try {
+								stats = await statsFn(cap.path)
+							} catch (error) {
+								stats = { ok: false, width: 0, height: 0, meanLuma: 0, blackPct: 100, error: String(error?.message ?? error) }
+							}
+						}
+						const wantW = Math.max(0, Number(c.w) - 200)
+						const one = {
+							name: c.name,
+							requested: rect,
+							ok: cap.ok !== false,
+							width: num(cap.width),
+							height: num(cap.height),
+							left: num(cap.left),
+							top: num(cap.top),
+							expectWidth: wantW,
+							blackPct: Number(stats.blackPct) || 0,
+							path: String(cap.path || ''),
+							error: String(cap.error || stats.error || ''),
+						}
+						probes.push(one)
+						lines.push(
+							`  越界实测 ${c.name}：请求 ${rect} → 实得 ${one.width}×${one.height} @ ${one.left},${one.top}` +
+								`（期望宽 ${wantW}）· blackPct=${one.blackPct}` +
+								(one.width === wantW ? ' · 裁剪正确' : ' · **尺寸与期望不符**') +
+								(one.blackPct >= 95 ? ' · **疑似黑图**' : '')
+						)
+					}
+				}
+				if (info.monitorCount < 2) {
+					lines.push(
+						'⚠️ 只有 1 台显示器：负坐标原点 / 混合 DPI **在这里无法验证**（本次只证明越界裁剪与"不静默黑图"）。' +
+							'接第二块屏（或把某块改成 150%）后重跑：negativeOrigin / mixedDpi 会变 true，两张越界图仍应"裁剪正确且非黑"。'
+					)
+				}
+				return {
+					ok: true,
+					monitorCount: info.monitorCount,
+					virtual: lossless(v),
+					monitors: lossless(info.monitors),
+					negativeOrigin: info.negativeOrigin === true,
+					mixedDpi: info.mixedDpi === true,
+					foreground: lossless(info.foreground || {}),
+					probes: lossless(probes),
+					error: '',
+					text: lines.join('\n'),
 				}
 			},
 		},
