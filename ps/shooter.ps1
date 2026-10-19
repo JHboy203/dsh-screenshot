@@ -200,6 +200,23 @@ while ($true) {
         $out['ok'] = $true
         $out['moved'] = [bool]$moved
         $out['x'] = $wx; $out['y'] = $wy; $out['delta'] = $wd; $out['times'] = $times
+      } elseif ($kind -eq 'postwheel') {
+        # Wheel message addressed straight at the target window: NO cursor move, no focus
+        # change. Used by the auto long screenshot first (R27); the caller decides whether the
+        # app honours it by comparing captured frames, so `posted` only means "accepted by
+        # user32" - never "the page scrolled".
+        $ph = [long]0; $px = 0; $py = 0; $pd = 0; $pt = 1
+        try { $ph = [long]$req.hwnd } catch { $ph = 0 }
+        try { $px = [int]$req.x } catch { $px = 0 }
+        try { $py = [int]$req.y } catch { $py = 0 }
+        try { $pd = [int]$req.delta } catch { $pd = 0 }
+        try { $pt = [Math]::Max(1, [Math]::Min(20, [int]$req.times)) } catch { $pt = 1 }
+        $posted = $false
+        if ($ph -gt 0) { $posted = [DshShot]::PostWheel([IntPtr]::new($ph), $px, $py, $pd, $pt) }
+        $out['ok'] = [bool]$posted
+        $out['posted'] = [bool]$posted
+        $out['hwnd'] = $ph; $out['x'] = $px; $out['y'] = $py; $out['delta'] = $pd; $out['times'] = $pt
+        if (-not $posted) { $out['error'] = 'PostMessage(WM_MOUSEWHEEL) rejected' }
       } else {
       $mode = 'desktop'
       if ([string]$req.mode -eq 'window') { $mode = 'window' }

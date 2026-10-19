@@ -1000,6 +1000,26 @@ log('[11] 滚轮走常驻助手（auto 长截图每帧发一次）')
 	// （会话进行中用户自己动鼠标时，还原本来就不可能精确）。
 	const parked = back !== null && Math.abs(back.x - tx) <= 2 && Math.abs(back.y - ty) <= 2 && !(before !== null && Math.abs(back.x - before.x) <= 2 && Math.abs(back.y - before.y) <= 2)
 	check('11.7 光标没有被留在滚动点上（用户动过鼠标时以"没停在目标点"为准）', back !== null && !parked, `before=${JSON.stringify(before)} after=${JSON.stringify(back)}`)
+
+	/**
+	 * 11.8 投递滚轮（R27）：**一个像素都不动光标**。
+	 *
+	 * 这是 `postWheel` 存在的全部理由：auto 长截图不再抢用户的鼠标、也不再因为用户在用鼠标
+	 * 而停摆。判据只能是"光标位置没变"——`posted=true` 只证明 user32 收下了消息，
+	 * 完全不证明目标应用处理了它（WinForms 就按真实光标位置分派滚轮，Chromium 认）。
+	 */
+	{
+		const hit = await shot.hitTest(tx, ty)
+		const winHwnd = hit !== null && hit.ok === true ? Number(hit.hwnd) || 0 : 0
+		const c0 = await readCursor()
+		const posted = await shot.postWheel(winHwnd, tx, ty, -120, 1)
+		const c1 = await readCursor()
+		check(
+			'11.8 投递滚轮不动光标（auto 不再抢用户的鼠标）',
+			winHwnd > 0 && posted.ok === true && posted.posted === true && c0 !== null && c1 !== null && Math.abs(c1.x - c0.x) <= 2 && Math.abs(c1.y - c0.y) <= 2,
+			`hwnd=${winHwnd} via=${posted.via} posted=${posted.posted} cursor ${JSON.stringify(c0)} → ${JSON.stringify(c1)}`
+		)
+	}
 }
 
 /* ─────────────────── 收尾 ─────────────────── */

@@ -95,6 +95,29 @@ public class DshShot {
     mouse_event(MouseWheel, 0, 0, delta, UIntPtr.Zero);
   }
 
+  // --- wheel message addressed straight at a window (R27) ---
+  // Moving the real cursor + mouse_event works everywhere but hijacks the user's mouse and
+  // refuses to act while they are using it. WM_MOUSEWHEEL posted to the target window needs
+  // neither. Whether the app HONOURS it is app-specific (measured: Chromium does, WinForms
+  // routes by the REAL cursor position) - so the caller must verify by looking at the captured
+  // pixels. A successful PostMessage proves NOTHING about the app's behaviour.
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  public const uint MouseWheelMessage = 0x020A;
+
+  // wParam = (delta << 16) | keyState, lParam = (y << 16) | (x & 0xFFFF) in SCREEN pixels.
+  // Returns "at least one PostMessage was accepted" - not "the app scrolled".
+  public static bool PostWheel(IntPtr h, int x, int y, int delta, int times) {
+    if (h == IntPtr.Zero) return false;
+    IntPtr wp = new IntPtr(delta * 65536);
+    IntPtr lp = new IntPtr(((y & 0xFFFF) << 16) | (x & 0xFFFF));
+    bool any = false;
+    int n = times < 1 ? 1 : times;
+    for (int i = 0; i < n; i++) {
+      if (PostMessage(h, MouseWheelMessage, wp, lp)) any = true;
+    }
+    return any;
+  }
+
   public static IntPtr HitTestRoot(int x, int y) {
     POINT p; p.X = x; p.Y = y;
     IntPtr leaf = WindowFromPoint(p);

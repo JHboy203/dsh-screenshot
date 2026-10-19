@@ -2846,8 +2846,9 @@ window.__ModuleLoader__.load({
 						hint.textContent = '页面没动了（到底了？）· 已 ' + frames + ' 帧'
 					} else {
 						hint.className = 'dshot-hk'
+						// wheelMode 只有 auto 才有意义：'post' = 滚轮直接投给窗口，**没动用户的鼠标**。
 						hint.textContent = mode === 'auto'
-							? '正在自己滚…' + (st.lastError ? '（' + st.lastError + '）' : '')
+							? '正在自己滚…' + (st.wheelMode === 'post' ? '（不动你的鼠标）' : '') + (st.lastError ? '（' + st.lastError + '）' : '')
 							: (native ? '先点一下你要截的那个窗口（它得在最前面），再用滚轮滚 · 停手就接一帧'
 								: '切到你要截的那个窗口，用你自己的滚轮滚 · 停手就接一帧（DSH 挡着会暂停）')
 					}
