@@ -2618,21 +2618,37 @@ window.__ModuleLoader__.load({
 		 * 控制着滚」的根因。所以：客户端只负责**显示状态和收尾**，抓帧/比对/拼接全在宿主。
 		 */
 		async function runLongSession(rect, opts) {
-			if (shot.api === null) return
+			if (shot.api === null) return { ok: false, error: '服务未就绪：宿主半边没起来' }
 			// native = 这块矩形是原生覆盖层给的（虚拟屏幕物理像素，可能在任何显示器上）。
 			const native = opts !== undefined && opts !== null && opts.native === true
 			const rectText = [Math.round(rect.x), Math.round(rect.y), Math.round(rect.w), Math.round(rect.h)].join(',')
-			const mode = prefs().scrollMode === 'auto' ? 'auto' : 'manual'
+			/**
+			 * 滚动方式：默认跟随偏好，但允许**本次会话**覆盖（`opts.mode`）。
+			 *
+			 * 为什么要这个覆盖：验证工具（桥的 `longshot` op）需要能指定 manual / auto，
+			 * 而"改偏好"是**用户的东西** —— 自检不许为了验证去改用户的设置（skill 的硬纪律）。
+			 * 会话级的 mode 只活在这一个会话里，跑完就没了。
+			 */
+			const mode = opts !== undefined && opts !== null && (opts.mode === 'auto' || opts.mode === 'manual')
+				? opts.mode
+				: (prefs().scrollMode === 'auto' ? 'auto' : 'manual')
 			let begin
 			try {
 				begin = await shot.api.scroll(rectText, JSON.stringify({ session: 'begin', mode: mode }))
 			} catch (error) {
 				toast('长截图启动失败：' + String((error && error.message) || error))
-				return
+				// 带上现场：这一版实例的 api 面到底长什么样（热重载后实例之间的差异只能这样看出来）。
+				const api = shot.api || {}
+				return {
+					ok: false,
+					error: 'scroll begin threw: ' + String((error && error.message) || error),
+					apiKeys: Object.keys(api).join(','),
+					scrollType: typeof api.scroll,
+				}
 			}
 			if (!begin || begin.ok !== true) {
 				toast('长截图启动失败：' + ((begin && begin.error) || '未知错误'))
-				return
+				return { ok: false, error: String((begin && begin.error) || 'unknown') }
 			}
 			// 旧宿主（没重启）会把 {session:'begin'} 当成老的一次性抓取：能返回 ok，但结果里
 			// **没有会话字段**。这时绝不能假装是一张"刚开了个会话"的图 —— 否则工具条会一直
@@ -2642,7 +2658,7 @@ window.__ModuleLoader__.load({
 			if (typeof begin.active !== 'boolean') {
 				toast('长截图要重启 DSH 之后才生效（宿主半边还是旧的）', 6000)
 				if (begin.id) await showOverlay({ id: begin.id, dataUrl: begin.dataUrl }, 'shot', false)
-				return
+				return { ok: false, error: 'host too old (no session fields)' }
 			}
 
 			const rootEl = document.createElement('div')
@@ -2731,14 +2747,18 @@ window.__ModuleLoader__.load({
 				busy = false
 			}
 
-			async function done() {
-				if (closed) return
+			/**
+			 * @param {string} [why] 收尾失败时给用户看的**原因**（比 end() 的 "not enough frames" 可读）。
+			 */
+			async function done(why) {
+				if (closed) return { ok: false, error: 'session already closed' }
 				closed = true
 				cleanup()
 				const res = await shot.api.scroll('', JSON.stringify({ session: 'end' }))
 				if (!res || res.ok !== true) {
-					toast('长截图收尾失败：' + ((res && res.error) || '未知错误'), 5200)
-					return
+					const reason = typeof why === 'string' && why !== '' ? why : String((res && res.error) || '未知错误')
+					toast('长截图收尾失败：' + reason, 5200)
+					return { ok: false, error: String((res && res.error) || 'end failed'), hint: reason }
 				}
 				toast(
 					(res.stopReason === 'max-height' ? '长图到上限了：' : '长图完成：') +
@@ -2747,15 +2767,34 @@ window.__ModuleLoader__.load({
 				)
 				// 交回覆盖层，可以继续标注 / 贴图 / 复制 / 贴进输入框
 				showOverlay({ id: res.id, dataUrl: res.dataUrl, hidden: false }, 'shot', false)
+				const out = {
+					ok: true,
+					id: res.id,
+					// path = 拼好的长图落在哪（探针直接拿它去 testbed_verify 做内容级验收）
+					path: res.path === undefined ? '' : String(res.path),
+					frames: res.frames,
+					width: res.width,
+					height: res.height,
+					stopReason: res.stopReason === undefined ? '' : String(res.stopReason),
+				}
+				/**
+				 * 记下"最近一张长图"。
+				 * ⚠️ auto 模式**自己会到底**，而 status 轮询一看到 `done` 就替你调 done() ——
+				 * 于是调用方（验证工具）赶到时会话已经收尾、`finish` 反而报"没有会话"。
+				 * 不留这个记录，产物路径就只能靠去 shots 目录里按时间猜。
+				 */
+				shot.longLast = out
+				return out
 			}
 
 			async function cancel() {
-				if (closed) return
+				if (closed) return { ok: false, error: 'session already closed' }
 				closed = true
 				cleanup()
 				try {
 					await shot.api.scroll('', JSON.stringify({ session: 'cancel' }))
 				} catch {}
+				return { ok: true }
 			}
 
 			function cleanup() {
@@ -2763,6 +2802,8 @@ window.__ModuleLoader__.load({
 				window.removeEventListener('resize', place)
 				rootEl.remove()
 				shot.longFinish = null
+				// 句柄跟着会话一起死：「完成之后还能 add」会打到一个已经结束的宿主会话上。
+				shot.longApi = null
 			}
 
 			/** 状态每 700ms 拉一次。DSH 失焦时这个定时器会被节流 —— 没关系，**
@@ -2781,14 +2822,25 @@ window.__ModuleLoader__.load({
 					if (st.done === true) {
 						// 宿主可能因为"已经到底"而收官，也可能因为"再拼就超过最大高度"而主动停 ——
 						// 后者对用户是重要信息（长图被截断在 30000px），不能和"到底了"混为一谈。
-						const why = st.stopReason === 'max-height' ? '已到长图上限（30000px），先拼这些' : '已经到底了'
+						// R25 多一种：自动滚发不出去（权限 / 用户握着鼠标）放弃，也要说清楚。
+						const why = st.stopReason === 'max-height'
+							? '已到长图上限（30000px），先拼这些'
+							: st.stopReason === 'wheel-refused'
+								? '自动滚发不出去（权限/鼠标被占用）· 改用「换我自己滚」'
+								: '已经到底了'
 						hint.textContent = why
-						await done()
+						// 一帧都没接到时 end() 会报 "not enough frames" —— 那句话对用户没有意义，
+						// 这里先把它换成能读的道理，收尾照走。
+						await done(st.stopReason === 'wheel-refused' ? '自动滚发不出去，没接到帧' : '')
 						return
 					}
 					if (st.paused && st.paused !== '') {
 						hint.className = 'dshot-hk is-warn'
-						hint.textContent = st.paused === 'self' ? '暂停：这块现在被 DSH 自己挡着' : '暂停：目标窗口不在最前面'
+						hint.textContent = st.paused === 'self'
+							? '暂停：这块现在被 DSH 自己挡着'
+							: st.paused === 'wheel-refused'
+								? '暂停：滚轮发不出去（权限/完整性），自动滚不动了'
+								: '暂停：目标窗口不在最前面'
 					} else if (st.stalled > 0) {
 						hint.className = 'dshot-hk is-warn'
 						hint.textContent = '页面没动了（到底了？）· 已 ' + frames + ' 帧'
@@ -2833,6 +2885,35 @@ window.__ModuleLoader__.load({
 				mk('✕', '取消长截图', () => cancel()),
 				mk('✓ 完成', '拼好并进入标注（热键再按一次也行）', () => done(), true)
 			)
+
+			/**
+			 * 给**程序**用的句柄（桥的 `longshot` op 用它）。
+			 *
+			 * 为什么需要：以前"验长截图 UI"只能靠 eval 把 `d.shot.api.scroll('','{"session":"add"}')`
+			 * 手拼出来 —— 那绕过了真实的 UI 路径（不建状态条、不动 line indicator），
+			 * 于是"UI 有没有画对"这件事永远验不到。这里把**用户那条路上的同一批函数**
+			 * （addFrame / done / cancel）交出去，验证走的就是用户走的那条路。
+			 */
+			shot.longApi = {
+				rect: { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+				rectText: rectText,
+				mode: mode,
+				add: () => addFrame(),
+				finish: () => done(),
+				cancel: () => cancel(),
+				state: () => ({
+					active: closed !== true,
+					frames: frames,
+					mode: mode,
+					rectText: rectText,
+					// drawn=false = 这块区域落在 DSH 窗口之外，框线故意没画（不是 bug）
+					drawn: frameEl.style.display !== 'none',
+					label: label.textContent,
+					hint: hint.textContent,
+					bar: barEl.isConnected === true,
+				}),
+			}
+			return { ok: true, frames: frames, mode: mode, rectText: rectText, drawn: frameEl.style.display !== 'none', label: label.textContent, hint: hint.textContent }
 		}
 
 		/* ══════════════ 窗口选择器 ══════════════ */
@@ -3007,16 +3088,63 @@ window.__ModuleLoader__.load({
 			 * 只让一个实例动手。
 			 */
 			id: Math.random().toString(36).slice(2, 8),
+			/**
+			 * 本实例**被 materialize 的时刻**（毫秒）。
+			 *
+			 * 为什么 build 不够：热重载会为**同一份代码**再生出好几个实例（实测改一次 client.js
+			 * 之后 R25 有 4 个），它们的 `build` 字符串一模一样 —— 于是"哪个才是刚改的那份"
+			 * 从回执里读不出来，按 build 点名会把一条开窗命令发给 4 个实例。
+			 * 有了 born，验证工具就能只挑**最新**的那个（见 lib/devtools.mjs 的 build 过滤）。
+			 */
+			born: Date.now(),
+			/** 被更新的实例顶替之后置 true（见 aiBridgeTick 顶部那段）。 */
+			retired: false,
 		}
 
 		function aiBridgeStart() {
 			if (AI_BRIDGE.timer !== null) return
+			// born 在这里补一次时间戳：模块顶层那一次发生在 `apply()` 之前（那时 Remote 还没挂上），
+			// 用"能干活了"的时刻做新旧判据才可靠 —— 半挂载的实例不该被当成"最新代码"。
+			AI_BRIDGE.born = Date.now()
+			// 广播自己（带 at = 心跳时刻）：比本实例更晚出生、**并且还活着**的那个会胜出。
+			window.__dshotLatest = { id: AI_BRIDGE.id, born: AI_BRIDGE.born, at: Date.now() }
 			AI_BRIDGE.timer = setInterval(() => void aiBridgeTick(), 1200)
 			void aiBridgeTick()
 		}
 
 		async function aiBridgeTick() {
 			if (AI_BRIDGE.busy) return
+			/**
+			 * ⚠️ **旧实例必须自己退场**（R25 的实测发现）。
+			 *
+			 * 热重载不是"替换"，是"再 materialize 一份"：旧模块实例还活着、定时器还在、
+			 * 还照常拉命令、还照常回执 —— 但它的 Remote 作用域已经跟着上一次 apply 一起废了。
+			 * 症状极具欺骗性：`eval` 拿 `window.__dshotDebug.shot`（**全局，已经被新实例覆盖**）
+			 * 一切正常，而这个实例自己的 `shot.api.scroll()` 抛
+			 * `remote.scroll is not a function`。于是回执里"有一个成功、几个莫名报错"，
+			 * 而 `target:'all'` 会把开窗动作在屏幕上执行 N 次。
+			 *
+			 * 判据：谁 born 更新谁赢；本实例一旦发现更晚的实例已经广播过，就停掉自己的定时器。
+			 */
+			const latest = window.__dshotLatest
+			const nowMs = Date.now()
+			const newerBorn = latest !== undefined && latest !== null ? Number(latest.born) || 0 : 0
+			const newerFresh = latest !== undefined && latest !== null && nowMs - (Number(latest.at) || 0) < 15000
+			if (latest !== undefined && latest !== null && latest.id !== AI_BRIDGE.id && newerBorn > AI_BRIDGE.born && newerFresh) {
+				AI_BRIDGE.retired = true
+				if (AI_BRIDGE.timer !== null) {
+					clearInterval(AI_BRIDGE.timer)
+					AI_BRIDGE.timer = null
+				}
+				return
+			}
+			// 我是当前最新（或那个"最新"已经 15 秒没心跳 = 它不存在了）：接过广播。
+			// ⚠️ 心跳是必须的：只有启动时广播一次的话，那个实例一旦不再 tick（模块被卸载 /
+			//    标签页被回收），活着的最新实例会读到一条**永不过期的**更晚 born 然后把自己也退掉
+			//    —— 表现成"桥突然谁都不回执"，而屏幕上一切正常（本轮实测踩到）。
+			if (latest === undefined || latest === null || latest.id === AI_BRIDGE.id || newerBorn <= AI_BRIDGE.born || !newerFresh) {
+				window.__dshotLatest = { id: AI_BRIDGE.id, born: AI_BRIDGE.born, at: nowMs }
+			}
 			AI_BRIDGE.busy = true
 			try {
 				const res = await fetch(AI_BRIDGE.url + '?t=' + Date.now(), { cache: 'no-store' })
@@ -3057,7 +3185,8 @@ window.__ModuleLoader__.load({
 					target: target === undefined ? 'focused' : String(target),
 					instance: {
 						id: AI_BRIDGE.id,
-						build: 'R21',
+						build: 'R25',
+						born: AI_BRIDGE.born,
 						vw: window.innerWidth,
 						vh: window.innerHeight,
 						dpr: window.devicePixelRatio,
@@ -3141,7 +3270,7 @@ window.__ModuleLoader__.load({
 					longBar: document.querySelector('.dshot-longbar') !== null,
 					menuRows: [...document.querySelectorAll('.dshot-mi')].map((r) => r.textContent),
 					toast: (() => { const t = document.querySelector('.dshot-toast'); return t === null ? '' : t.textContent })(),
-					bridge: { runs: AI_BRIDGE.runs, seq: AI_BRIDGE.seq, lastError: AI_BRIDGE.lastError },
+					bridge: { runs: AI_BRIDGE.runs, seq: AI_BRIDGE.seq, lastError: AI_BRIDGE.lastError, born: AI_BRIDGE.born, retired: AI_BRIDGE.retired === true },
 				}
 			}
 			if (kind === 'click') {
@@ -3190,8 +3319,94 @@ window.__ModuleLoader__.load({
 				}
 				return { op: 'dom', ok: true, nodes: out }
 			}
-			if (kind === 'reset') {
-				if (shot.cover !== null && shot.cover !== undefined) { try { shot.cover.destroy() } catch {} shot.cover = null }
+			if (kind === 'longshot') {
+				/**
+				 * 长截图的**程序入口**（R25，backlog ④）。
+				 *
+				 * 以前验这块只能 eval 拼 `d.shot.api.scroll('','{"session":"add"}')` ——
+				 * 那绕过整条 UI 路径：状态条不建、框线不画、`frames` 也不进状态条，
+				 * 于是"UI 有没有画对"永远验不到。这个 op 走的是 `runLongSession` 本人。
+				 *
+				 *   {op:'longshot', action:'begin', rect:'x,y,w,h'|{x,y,w,h}, mode:'manual'|'auto'}
+				 *   {op:'longshot', action:'add'|'status'|'finish'|'cancel', keep?:boolean}
+				 *
+				 * ⚠️ `begin` 会**真的**在桌面上开一个长截图会话（屏幕上出现状态条），
+				 *    探针必须用 finish / cancel 收尾 —— 否则用户屏幕上会留一条状态条。
+				 */
+				const action = String(op.action || 'begin')
+				// 两种"没有"都要认：从没设过是 undefined，会话结束是 null。
+				const readState = () => {
+					const api = shot.longApi
+					if (api === null || api === undefined) return null
+					try { return api.state() } catch (error) { return { error: String((error && error.message) || error) } }
+				}
+				if (action === 'begin') {
+					let rect = op.rect
+					if (typeof rect === 'string') {
+						const p = rect.split(',').map((v) => Number(String(v).trim()))
+						if (p.length !== 4 || p.some((v) => !Number.isFinite(v))) {
+							return { op: 'longshot', ok: false, error: 'rect 字符串要 "x,y,w,h"' }
+						}
+						rect = { x: p[0], y: p[1], w: p[2], h: p[3] }
+					} else if (Array.isArray(rect) && rect.length === 4) {
+						rect = { x: Number(rect[0]), y: Number(rect[1]), w: Number(rect[2]), h: Number(rect[3]) }
+					}
+					if (rect === null || typeof rect !== 'object' || !(Number(rect.w) > 0) || !(Number(rect.h) > 0)) {
+						return { op: 'longshot', ok: false, error: 'rect 需要 {x,y,w,h}、[x,y,w,h] 或 "x,y,w,h"（w/h 必须 > 0）' }
+					}
+					const wantMode = op.mode === 'auto' || op.mode === 'manual' ? op.mode : undefined
+					const res = await runLongSession({ x: Number(rect.x) || 0, y: Number(rect.y) || 0, w: Number(rect.w), h: Number(rect.h) }, { native: true, mode: wantMode })
+					await new Promise((r) => setTimeout(r, Number(op.settle) || 600))
+					return Object.assign({ op: 'longshot', action: 'begin', state: readState() }, res)
+				}
+				if (shot.longApi === null || shot.longApi === undefined) {
+					// auto 模式自己到底就收尾了：这时"没有会话"≠"什么也没发生"，把上一张长图交回去。
+					if (action === 'finish' || action === 'status') {
+						const last = shot.longLast || null
+						return {
+							op: 'longshot',
+							action: action,
+							ok: last !== null && last.ok === true,
+							alreadyDone: last !== null,
+							state: null,
+							last: last,
+							path: last === null ? '' : last.path,
+							frames: last === null ? 0 : last.frames,
+							width: last === null ? 0 : last.width,
+							height: last === null ? 0 : last.height,
+							stopReason: last === null ? '' : last.stopReason,
+							error: last === null ? '没有正在进行的长截图会话，也没有上一张长图（先 action:begin）' : '',
+						}
+					}
+					return { op: 'longshot', action: action, ok: false, error: '没有正在进行的长截图会话（先 action:begin）', longApi: String(shot.longApi) }
+				}
+				if (action === 'add') {
+					await shot.longApi.add()
+					const st = readState()
+					return { op: 'longshot', action: 'add', ok: st !== null, frames: st === null ? 0 : st.frames, hint: st === null ? '' : st.hint, state: st }
+				}
+				if (action === 'status') {
+					return { op: 'longshot', action: 'status', ok: true, state: readState() }
+				}
+				if (action === 'cancel') {
+					const res = await shot.longApi.cancel()
+					await new Promise((r) => setTimeout(r, 250))
+					return { op: 'longshot', action: 'cancel', ok: res.ok === true, state: readState() }
+				}
+				if (action === 'finish') {
+					const res = await shot.longApi.finish()
+					// 默认**不留东西在用户屏幕上**：finish 会进标注覆盖层，验证完立刻收掉。
+					await new Promise((r) => setTimeout(r, Number(op.settle) || 400))
+					const overlay = overlaySnapshot()
+					if (op.keep !== true && shot.cover !== null && shot.cover !== undefined) {
+						try { shot.cover.destroy() } catch {}
+						shot.cover = null
+					}
+					return Object.assign({ op: 'longshot', action: 'finish', overlayKept: op.keep === true, overlay: overlay, state: readState() }, res)
+				}
+				return { op: 'longshot', action: action, ok: false, error: '未知 action（begin/add/status/finish/cancel）' }
+			}
+			if (kind === 'reset') {				if (shot.cover !== null && shot.cover !== undefined) { try { shot.cover.destroy() } catch {} shot.cover = null }
 				document.querySelectorAll('.dshot-menu,.dshot-winlist,.dshot-longroot,.dshot-recpanel,.dshot-palette,.dshot-pin').forEach((n) => n.remove())
 				return { op: 'reset', ok: true }
 			}
@@ -3890,7 +4105,7 @@ window.__ModuleLoader__.load({
 			//    所以给一个明确命名的钩子，而不是把内部状态散到 window 上。
 			window.__dshotDebug = {
 				/** 版本标记：AI 直连桥靠它判断"我改的这版到底加载了没有"（热重载有延迟）。 */
-				build: 'R21',
+				build: 'R25',
 				shot: shot,
 				prefs: prefs,
 				setPref: setPref,
@@ -3923,6 +4138,8 @@ window.__ModuleLoader__.load({
 				shot.diag.injected = true
 				const remote = scope.remote[SERVICE]
 				shot.diag.apiSet = !!remote
+				// 能干活了（不参与新旧排序：排序只看 apply 结束的 born，见 AI_BRIDGE.born）。
+				AI_BRIDGE.readyAt = Date.now()
 				shot.api = {
 					cap: (mode, hide, method, hwnd, rect) =>
 						Promise.resolve(

@@ -903,6 +903,94 @@ log('[9] 常驻抓屏助手（shooter）')
 	check('10.7 收尾干净（OS 进程真的没了）', overlay.overlayStatus().alive === false, `alive=${overlay.overlayStatus().alive}`)
 }
 
+/* ─────────────────── 11. 滚轮搬进常驻助手（R25） ─────────────────── */
+
+// auto 长截图**每一帧**发一次滚轮。原来是 `spawn pwsh wheel.ps1`：实测 600-900ms 的进程
+// 启动换 ~1ms 的 mouse_event，整条循环被它钉死。这一段要证明三件事：
+//   ① 快路径真的走助手，而且**光标真的到了那个点位**（语义与老脚本逐字相同）；
+//   ② 老路径还在，且两条路给出同一个光标位置；
+//   ③ 快路径明显更快 —— 不然这一轮就不该做。
+// ⚠️ 这一段会**动用户真实的鼠标**，结束时必须还原（11.7）。
+log('[11] 滚轮走常驻助手（auto 长截图每帧发一次）')
+{
+	const before = await readCursor()
+	check('11.0 读得到当前光标位置（不然后面无从判断）', before !== null, JSON.stringify(before))
+
+	// 目标点：测试窗口那条"没人盖住"的窄带中间（见 [0] 里那张覆盖图）。
+	// ⚠️ 这个点在屏幕右侧（x≈1858），125% 缩放下**只有 DPI-aware 的进程**放得上去：
+	//    未声明 DPI 的进程看到 1536 宽的虚拟桌面，SetCursorPos 会被静默夹到 1535
+	//    —— 光标 y 对、x 差 323，滚轮于是落在别的窗口上。11.4b 就是这条的回归测试。
+	const tx = WIN.x + Math.round(WIN.w / 2)
+	const ty = WIN.y + Math.round(WIN.h / 2)
+
+	// 助手是**惰性**的（[9.6] 收尾时被停掉了；生产里也是"下一次抓屏顺手拉一个"）。
+	if (shooter.shooterStatus().ready !== true) {
+		shooter.startShooter()
+		const until = Date.now() + 25_000
+		while (Date.now() < until && shooter.shooterStatus().ready !== true) await sleep(80)
+	}
+	const readyNow = shooter.shooterStatus()
+	check('11.1 助手就绪（快路径可用）', readyNow.ready === true, `ready=${readyNow.ready} pid=${readyNow.pid}`)
+
+	/**
+	 * 合成滚轮只有在**光标真的停在那个点上**时才会发出去（见 shotcore.ps1 的 WheelAt）。
+	 * 用户此刻如果正握着鼠标，SetCursorPos 之后光标会在等待窗口里被人的手拉走 → moved=false。
+	 * 这不是缺陷，是"绝不滚错窗口"的代价。所以判据是"**多试几次里至少成功一次**"，
+	 * 而不是"每一次都必须成功"—— 后者在有人在用的机器上必然是红的。
+	 */
+	const wheelAttempts = async (useHelper) => {
+		const list = []
+		for (let i = 0; i < 4; i += 1) {
+			if (!useHelper) process.env.DSH_SHOT_HELPER = '0'
+			const one = await shot.wheelAt(tx, ty, -120, 1)
+			if (!useHelper) delete process.env.DSH_SHOT_HELPER
+			list.push(one)
+			if (one.moved === true) break
+			await sleep(250)
+		}
+		return list
+	}
+	const brief = (list) => list.map((r) => `${r.via}:${r.moved === true ? 'moved' : r.moved === false ? 'refused' : 'unknown'}`).join(' → ')
+
+	const tFast = Date.now()
+	const fastList = await wheelAttempts(true)
+	const fastMs = Math.round((Date.now() - tFast) / fastList.length)
+	const fast = fastList[fastList.length - 1]
+	const afterFast = await readCursor()
+	check('11.2 快路径真的走助手', fast.via === 'helper', `via=${fast.via} ok=${fast.ok} attempts=${brief(fastList)}`)
+	// ⚠️ 判据用**脚本自己观察到的** moved，不是"事后再读一次光标"：这台机器上人可以随时
+	//    动鼠标，事后读出来的位置可能是人的手，用它当判据必然抖（R25 实测栽过）。
+	check('11.3 快路径把光标放到了目标点（语义与老脚本一致）', fastList.some((r) => r.moved === true), `want=${tx},${ty} attempts=${brief(fastList)} after=${JSON.stringify(afterFast)}`)
+
+	// 老路径对照：同一点位、同一个进程，只是关掉助手。
+	const tSlow = Date.now()
+	const slowList = await wheelAttempts(false)
+	const slowMs = Math.round((Date.now() - tSlow) / slowList.length)
+	const slow = slowList[slowList.length - 1]
+	const afterSlow = await readCursor()
+	check('11.4 老路径仍在（助手不可用时回落 wheel.ps1）', slow.via === 'spawn' && slow.ok === true, `via=${slow.via} ok=${slow.ok} attempts=${brief(slowList)}`)
+	// ★ 这条是 wheel.ps1 的 DPI 回归测试：未声明 DPI 时 SetCursorPos(1858) 会被静默夹到 1535，
+	//   脚本据此回 moved=false（并且**不发滚轮**）—— 于是"自动滚"滚的是别的窗口。
+	check('11.4b 老路径也把光标放到了目标点（DPI 未声明会被夹到 1535）',
+		slowList.some((r) => r.moved === true), `want=${tx},${ty} attempts=${brief(slowList)} err=${slow.error} after=${JSON.stringify(afterSlow)}`)
+	{
+		const okFast = fastList.find((r) => r.moved === true)
+		const okSlow = slowList.find((r) => r.moved === true)
+		check('11.5 两条路回传同一组坐标（语义逐字相同）',
+			okFast !== undefined && okSlow !== undefined && okFast.x === okSlow.x && okFast.y === okSlow.y && okFast.delta === okSlow.delta,
+			`fast=${okFast === undefined ? '-' : okFast.x + ',' + okFast.y + '/' + okFast.delta} slow=${okSlow === undefined ? '-' : okSlow.x + ',' + okSlow.y + '/' + okSlow.delta}`)
+	}
+
+	check('11.6 快路径明显更快（这就是这一轮的意义）', fastMs * 3 < slowMs, `fast≈${fastMs}ms slow≈${slowMs}ms (${fastList.length}/${slowList.length} 次)`)
+
+	if (before !== null) await setPosProbe(before)
+	const back = await readCursor()
+	// 真正的伤害是"把用户的光标留在滚动用的那个点上"，不是"没还原到一像素不差"
+	// （会话进行中用户自己动鼠标时，还原本来就不可能精确）。
+	const parked = back !== null && Math.abs(back.x - tx) <= 2 && Math.abs(back.y - ty) <= 2 && !(before !== null && Math.abs(back.x - before.x) <= 2 && Math.abs(back.y - before.y) <= 2)
+	check('11.7 光标没有被留在滚动点上（用户动过鼠标时以"没停在目标点"为准）', back !== null && !parked, `before=${JSON.stringify(before)} after=${JSON.stringify(back)}`)
+}
+
 /* ─────────────────── 收尾 ─────────────────── */
 
 try {

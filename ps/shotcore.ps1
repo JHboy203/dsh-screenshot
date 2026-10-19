@@ -60,6 +60,41 @@ public class DshShot {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 
+  // --- synthetic wheel (R25): the AUTO long-screenshot sends one wheel per frame, and
+  //     spawning ps/wheel.ps1 for each one was the last per-frame process cost in the loop
+  //     (~600-900ms of process start for ~1ms of mouse_event). Same P/Invokes as wheel.ps1,
+  //     same order, same waits - wheel.ps1 stays as the fallback path.
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);
+  public const uint MouseWheel = 0x0800;
+
+  public static bool CursorIsAt(int x, int y) {
+    POINT p;
+    if (!GetCursorPos(out p)) return false;
+    return p.X == x && p.Y == y;
+  }
+
+  // Returns "the cursor really is on that point" - NOT "I called SetCursorPos".
+  // A low-integrity caller (the DSH tool sandbox) gets SetCursorPos accepted and then
+  // SILENTLY DROPPED by UIPI, so trusting the return value would scroll whatever window the
+  // user's pointer happened to be over. Waiting for the position to change keeps it honest.
+  public static bool WheelAt(int x, int y, int delta) {
+    SetCursorPos(x, y);
+    int waited = 0;
+    while (waited < 120) {
+      if (CursorIsAt(x, y)) return true;
+      System.Threading.Thread.Sleep(4);
+      waited += 4;
+    }
+    // Cursor never arrived. Do NOT send the wheel: it would land on a different window.
+    return false;
+  }
+
+  public static void Wheel(int delta) {
+    mouse_event(MouseWheel, 0, 0, delta, UIntPtr.Zero);
+  }
+
   public static IntPtr HitTestRoot(int x, int y) {
     POINT p; p.X = x; p.Y = y;
     IntPtr leaf = WindowFromPoint(p);

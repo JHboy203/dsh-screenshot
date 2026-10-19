@@ -175,6 +175,31 @@ while ($true) {
           $out['w'] = [int]($tr.R - $tr.L)
           $out['h'] = [int]($tr.B - $tr.T)
         }
+      } elseif ($kind -eq 'wheel') {
+        # AUTO long screenshot asks this once per frame. Spawning ps/wheel.ps1 for each frame
+        # cost ~600-900ms of process start (measured) for ~1ms of mouse_event, and the auto
+        # loop could not go faster than that. Same order and waits as wheel.ps1; wheel.ps1
+        # stays as the fallback for callers that ask before this helper is warm.
+        $wx = 0; $wy = 0; $wd = 0; $times = 1
+        try { $wx = [int]$req.x } catch { $wx = 0 }
+        try { $wy = [int]$req.y } catch { $wy = 0 }
+        try { $wd = [int]$req.delta } catch { $wd = 0 }
+        try { $times = [Math]::Max(1, [Math]::Min(20, [int]$req.times)) } catch { $times = 1 }
+        $moved = $true
+        for ($i = 0; $i -lt $times; $i++) {
+          if ([DshShot]::WheelAt($wx, $wy, $wd)) {
+            [DshShot]::Wheel($wd)
+          } else {
+            # Cursor never got there (UIPI drops SetCursorPos for low-integrity callers).
+            # Do NOT scroll: the wheel would land on a different window.
+            $moved = $false
+            break
+          }
+          if ($i -lt ($times - 1)) { Start-Sleep -Milliseconds 60 }
+        }
+        $out['ok'] = $true
+        $out['moved'] = [bool]$moved
+        $out['x'] = $wx; $out['y'] = $wy; $out['delta'] = $wd; $out['times'] = $times
       } else {
       $mode = 'desktop'
       if ([string]$req.mode -eq 'window') { $mode = 'window' }

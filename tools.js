@@ -301,7 +301,9 @@ export function buildShotTools(deps = {}) {
 			name: 'shot_bridge',
 			description:
 				'驱动正在运行中的 DSH 客户端（dsh-screenshot 的 AI 直连桥）：status 看通道与实例；' +
-				'send 执行 ops（state / eval / click / menu / dom / reset）并等回执；results 读最近的回执。' +
+				'send 执行 ops（state / eval / click / menu / dom / longshot / reset）并等回执；results 读最近的回执。' +
+				'longshot op 是长截图的程序入口：{op:"longshot",action:"begin",rect:"x,y,w,h",mode:"manual"}，' +
+				'之后 add / status / finish / cancel —— 走的是用户点「长截图」时那条路（状态条、框线都会真的建）。' +
 				'静态口不通时会自动起一个（node .tools/devserver.mjs 8934）。改完 client.js 用它验证客户端是否真的热重载了。',
 			parameters: {
 				type: 'object',
@@ -314,6 +316,12 @@ export function buildShotTools(deps = {}) {
 						description: 'send 的完整写法：[{op:"state"},{op:"eval",js:"..."},{op:"click",text:"长截图"}]',
 					},
 					target: { type: 'string', description: "'all'（默认，所有并存实例）/ 'focused'（只有有焦点的那个）/ 具体实例 id。" },
+					build: {
+						type: 'string',
+						description:
+							'只发给这个 build 的实例（如 "R25"）。热重载后同一页会同时活着好几个版本的模块，' +
+							'target=all 会让每个实例都执行一次（开窗的 op 于是开 8 个会话）—— 按 build 点名才只让新代码动。',
+					},
 					waitMs: { type: 'number', description: '等回执的上限，默认 25000。' },
 					limit: { type: 'number', description: 'results 时最多返回几条，默认 10。' },
 					tag: { type: 'string', description: "results 时按 tag 过滤（如 'ai-result' / 'region-result'）。" },
@@ -344,6 +352,7 @@ export function buildShotTools(deps = {}) {
 				const res = await bridgeSend({
 					ops,
 					target: typeof raw.target === 'string' && raw.target !== '' ? raw.target : 'all',
+					build: typeof raw.build === 'string' ? raw.build : '',
 					waitMs: num(raw.waitMs) > 0 ? num(raw.waitMs) : 25_000,
 				})
 				return {

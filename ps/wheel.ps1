@@ -44,13 +44,26 @@ public class DshWheel {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);
+  // DPI: everything this script touches is in PHYSICAL screen pixels (the overlay reports the
+  // virtual screen in physical px). An unaware process gets a VIRTUALISED desktop (1920 -> 1536
+  // at 125%) and SetCursorPos silently CLAMPS to it -- measured R25: asking for x=1858 landed
+  // the cursor on x=1535, so the wheel scrolled whatever window happened to be there.
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int v);
   public const uint WHEEL = 0x0800;
   public const uint LEFTDOWN = 0x0002;
   public const uint LEFTUP = 0x0004;
+  public static void MakeDpiAware() {
+    try { SetProcessDpiAwareness(2); } catch { }   // PROCESS_PER_MONITOR_DPI_AWARE
+    try { SetProcessDPIAware(); } catch { }        // fallback (Win7+)
+  }
   public static void Scroll(int dx) { mouse_event(WHEEL, 0, 0, dx, UIntPtr.Zero); }
   public static void Click() { mouse_event(LEFTDOWN, 0, 0, 0, UIntPtr.Zero); mouse_event(LEFTUP, 0, 0, 0, UIntPtr.Zero); }
 }
 "@
+
+# Must happen before ANY pixel is read or written (see MakeDpiAware above).
+[DshWheel]::MakeDpiAware()
 
 function Write-Json($obj) {
   Write-Output ($obj | ConvertTo-Json -Compress)
@@ -106,10 +119,28 @@ if ($X -eq [int]::MinValue -or $Y -eq [int]::MinValue) {
 }
 
 [DshWheel]::SetCursorPos($X, $Y) | Out-Null
-Start-Sleep -Milliseconds 40
+# Wait for the cursor to ACTUALLY arrive before sending the wheel.
+#
+# Why: the wheel goes to whatever window is under the cursor. If SetCursorPos is dropped
+# (low-integrity caller / UIPI) or clamped (DPI-unaware process on a scaled screen), sending
+# the wheel anyway would scroll a DIFFERENT window - silently, and the long screenshot just
+# says "the page did not move". Report `moved` from what we observe, not from SetCursorPos's
+# return value, and never scroll when it did not take.
+$moved = $false
+$waited = 0
+while ($waited -lt 150) {
+  $p0 = New-Object DshWheel+POINT
+  if ([DshWheel]::GetCursorPos([ref]$p0) -and $p0.X -eq $X -and $p0.Y -eq $Y) { $moved = $true; break }
+  Start-Sleep -Milliseconds 4
+  $waited += 4
+}
+if (-not $moved) {
+  Write-Json @{ ok = $true; moved = $false; x = $X; y = $Y; delta = $Delta; times = 0; error = 'cursor did not reach the point; wheel not sent' }
+  exit 0
+}
 for ($i = 0; $i -lt [Math]::Max(1, $Times); $i++) {
   [DshWheel]::Scroll($Delta)
   Start-Sleep -Milliseconds 60
 }
-Write-Json @{ ok = $true; x = $X; y = $Y; delta = $Delta; times = $Times }
+Write-Json @{ ok = $true; moved = $true; x = $X; y = $Y; delta = $Delta; times = $Times }
 exit 0
