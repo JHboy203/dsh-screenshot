@@ -50,6 +50,23 @@ public class DshShot {
   [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int v);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+  // --- hit test (used by the resident helper so the scroll loop does not spawn hitwin.ps1
+  //     once per tick; hitwin.ps1 itself stays as the fallback path) ---
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  // GA_ROOT = 2. WindowFromPoint only ever returns a leaf (the Electron render widget, say);
+  // callers want the top-level window, so walk up exactly once.
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+
+  public static IntPtr HitTestRoot(int x, int y) {
+    POINT p; p.X = x; p.Y = y;
+    IntPtr leaf = WindowFromPoint(p);
+    if (leaf == IntPtr.Zero) return IntPtr.Zero;
+    IntPtr root = GetAncestor(leaf, 2);
+    return root == IntPtr.Zero ? leaf : root;
+  }
 
   public static void MakeDpiAware() {
     try { SetProcessDpiAwareness(2); } catch { }   // PROCESS_PER_MONITOR_DPI_AWARE

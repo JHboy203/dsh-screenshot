@@ -143,6 +143,39 @@ while ($true) {
 
     $out = [ordered]@{ seq = $seq; ok = $false; error = ''; exitCode = 0; ms = 0 }
     try {
+      $kind = [string]$req.kind
+      if ($kind -eq 'hittest') {
+        # Long-capture manual mode calls this on EVERY tick. Spawning hitwin.ps1 each time costs
+        # ~1.2s of cold start and becomes the ceiling of the whole loop; doing it inside this
+        # resident process costs microseconds. hitwin.ps1 remains the fallback for callers that
+        # ask before this helper is warm.
+        $hx = 0; $hy = 0
+        try { $hx = [int]$req.x } catch { $hx = 0 }
+        try { $hy = [int]$req.y } catch { $hy = 0 }
+        $th = [DshShot]::HitTestRoot($hx, $hy)
+        if ($th -eq [IntPtr]::Zero) {
+          $out['ok'] = $false
+          $out['error'] = 'no window at ' + $hx + ',' + $hy
+        } else {
+          $tsb = New-Object System.Text.StringBuilder 512
+          [void][DshShot]::GetWindowTextW($th, $tsb, 512)
+          $csb = New-Object System.Text.StringBuilder 256
+          [void][DshShot]::GetClassNameW($th, $csb, 256)
+          $tr = New-Object DshShot+RECT
+          [void][DshShot]::GetWindowRect($th, [ref]$tr)
+          $tpid = [uint32]0
+          [void][DshShot]::GetWindowThreadProcessId($th, [ref]$tpid)
+          $out['ok'] = $true
+          $out['hwnd'] = [long]$th
+          $out['title'] = $tsb.ToString()
+          $out['class'] = $csb.ToString()
+          $out['pid'] = [int]$tpid
+          $out['x'] = [int]$tr.L
+          $out['y'] = [int]$tr.T
+          $out['w'] = [int]($tr.R - $tr.L)
+          $out['h'] = [int]($tr.B - $tr.T)
+        }
+      } else {
       $mode = 'desktop'
       if ([string]$req.mode -eq 'window') { $mode = 'window' }
       $method = 'screen'
@@ -164,6 +197,7 @@ while ($true) {
         $out['ok'] = $false
         $out['error'] = [string]$r.error
         $out['exitCode'] = [int]$r.exitCode
+      }
       }
     } catch {
       # One bad request must never take the helper down - the Node side would then fall back to

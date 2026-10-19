@@ -1575,6 +1575,13 @@ window.__ModuleLoader__.load({
 				scrollMode: 'manual',
 				/** 录屏结束后是否先把文件放进剪贴板（用户可以粘到任何地方）。 */
 				recClip: true,
+				/**
+				 * 录屏范围：
+				 *   'screen' 整个桌面（老行为，默认）
+				 *   'pick'   每次开始录之前先用**原生覆盖层**框一块（只要矩形）
+				 * 宿主侧一直支持 `region`（`-offset_x/-offset_y/-video_size`），缺的只是这一头的取区域。
+				 */
+				recRegion: 'screen',
 			}
 			try {
 				const raw = window.localStorage.getItem(LS_KEY)
@@ -1887,14 +1894,54 @@ window.__ModuleLoader__.load({
 			shot.recTimer = setInterval(tick, 500)
 		}
 
-		async function startRecording() {
+		async function startRecording(opts) {
 			if (shot.api === null) return toast('截图服务未就绪（宿主半边没起来）')
-			const res = await shot.api.record('start', JSON.stringify({ fps: 15, audio: false }))
+			// 仅测试：AI 直连桥驱动时带 selfTest，让助手自己框一块（沙箱里没人能拖鼠标）。
+			const selfTest = opts !== undefined && opts !== null && opts.selfTest === true
+			let region = ''
+			let regionText = '整屏'
+			if (prefs().recRegion === 'pick') {
+				toast('框住要录的区域 · Esc 取消', 60000)
+				const pick = await pickNativeRectOnly(selfTest)
+				if (pick.ok !== true) {
+					if (pick.cancelled === true) return toast('已取消录屏', 1200)
+					if (pick.reason === 'no-overlay') {
+						// 不能把"框选"静默换成"整屏"—— 那会录到用户根本不想公开的桌面。
+						// 说清楚，然后按整屏录（他点的是录屏，不是取消）。
+						toast('原生覆盖层不可用，这次先整屏录制', 3200)
+					} else {
+						return toast('没框到要录的区域（' + pick.reason + '）', 2400)
+					}
+				} else {
+					const r = pick.rect
+					region = [r.x, r.y, r.w, r.h].join(',')
+					regionText = r.w + '×' + r.h
+				}
+			}
+			const res = await shot.api.record('start', JSON.stringify({ fps: 15, audio: false, region }))
 			if (res.ok !== true) return toast('录屏启动失败：' + (res.error || '未知错误'))
 			shot.recording = true
 			shot.recStart = Date.now()
 			showRecPill()
-			toast('开始录屏（整屏），点右上角「停止」结束')
+			toast('开始录屏（' + regionText + '），点右上角「停止」结束')
+		}
+
+		/**
+		 * 只要一块矩形（录屏用）：返回 `{ok, rect}` / `{ok:false, cancelled, reason}`。
+		 * 与 doNativeRegion 的区别是**它不自己消费这块矩形** —— 调用方要拿它去 `record start`。
+		 * 失败一律**如实返回原因**，绝不返回一个"默认整屏"的假成功。
+		 */
+		async function pickNativeRectOnly(selfTest) {
+			if (shot.api === null || typeof shot.api.overlay !== 'function') return { ok: false, reason: 'no-overlay' }
+			let res
+			try {
+				res = await shot.api.overlay(180, JSON.stringify(selfTest === true ? { regionOnly: true, selfTest: true } : { regionOnly: true }))
+			} catch (error) {
+				return { ok: false, reason: String((error && error.message) || error) }
+			}
+			const picked = res && res.ok === true && Number(res.w) > 3 && Number(res.h) > 3
+			if (!picked) return { ok: false, cancelled: res && res.cancelled === true, reason: String((res && (res.reason || res.error)) || 'unknown') }
+			return { ok: true, rect: { x: Math.round(res.x), y: Math.round(res.y), w: Math.round(res.w), h: Math.round(res.h) } }
 		}
 
 		async function stopRecording() {
@@ -3010,7 +3057,7 @@ window.__ModuleLoader__.load({
 					target: target === undefined ? 'focused' : String(target),
 					instance: {
 						id: AI_BRIDGE.id,
-						build: 'R20',
+						build: 'R21',
 						vw: window.innerWidth,
 						vh: window.innerHeight,
 						dpr: window.devicePixelRatio,
@@ -3512,7 +3559,9 @@ window.__ModuleLoader__.load({
 			menu.append(
 				item('✂', '截图', hkOff ? '' : hk('shot'), () => {
 					close()
-					void doCapture('shot')
+					// 走唯一入口：这行以前直接 doCapture('shot')，于是「菜单里点截图」
+					// 和「按热键/点按钮」走了两条不同的路（前者永远 DOM）。
+					void doShotEntry()
 				}),
 				item('⏺', shot.recording ? '停止录屏' : '录屏', hkOff ? '' : hk('record'), () => {
 					close()
@@ -3588,6 +3637,11 @@ window.__ModuleLoader__.load({
 						setPref('scrollMode', prefs().scrollMode === 'auto' ? 'manual' : 'auto')
 						row.querySelector('span:nth-child(2)').textContent =
 							'长截图方式：' + (prefs().scrollMode === 'auto' ? '程序自己滚' : '我自己滚')
+					}),
+					item('▭', '录制范围：' + (prefs().recRegion === 'pick' ? '每次框一块' : '整个桌面'), '', (row) => {
+						setPref('recRegion', prefs().recRegion === 'pick' ? 'screen' : 'pick')
+						row.querySelector('span:nth-child(2)').textContent =
+							'录制范围：' + (prefs().recRegion === 'pick' ? '每次框一块' : '整个桌面')
 					}),
 					item('译', '屏幕翻译（OCR → 交给 DSH）', hkOff ? '' : hk('translate'), () => {
 						close()
@@ -3836,7 +3890,7 @@ window.__ModuleLoader__.load({
 			//    所以给一个明确命名的钩子，而不是把内部状态散到 window 上。
 			window.__dshotDebug = {
 				/** 版本标记：AI 直连桥靠它判断"我改的这版到底加载了没有"（热重载有延迟）。 */
-				build: 'R20',
+				build: 'R21',
 				shot: shot,
 				prefs: prefs,
 				setPref: setPref,
@@ -3846,6 +3900,9 @@ window.__ModuleLoader__.load({
 				// 因为它绕开的只是"人手拖框"那一步，不是任何一段代码。
 				doNativeRegion: doNativeRegion,
 				doShotEntry: doShotEntry,
+				// 录屏也放出来：区域录制这条链要能被真机验证（框 → record start → ffprobe 尺寸）
+				startRecording: startRecording,
+				stopRecording: stopRecording,
 				openMenu: openMenu,
 				pinImage: pinImage,
 				toast: toast,

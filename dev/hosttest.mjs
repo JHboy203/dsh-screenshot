@@ -12,9 +12,13 @@
  * 产物全部落在 .tmp-shot-lab/host/ 下（用 DSH_SHOT_CACHE / DSH_SHOT_DIR 改道，
  * 因为沙箱禁止子进程写插件目录 —— 这两个开关就是为这件事存在的）。
  *
- * 测试用的"会滚的窗口"是 .tmp-shot-lab/host/scroller.ps1：一块真 WinForms 窗口，
+ * 测试用的"会滚的窗口"是 **dev/scroller.ps1**（就在本脚本旁边）：一块真 WinForms 窗口，
  * 里面是一张 12000px 高的位图，node 通过一个控制文件让它上下滚 —— 于是长截图拿到的是
  * **真的、有重叠的**滚动，而不是"随便找块屏幕碰运气"。
+ *
+ * 这个夹具**故意**放在 dev/ 而不是 .tmp-shot-lab/：后者是产物目录，会被清理。
+ * 它曾经待在那里、被一次"清理测试产物"顺手删掉，结果是 host_selfcheck 报
+ * "测试窗口没起来"、3/4/7 三组静默地什么也没跑。夹具必须跟着拥有它的测试走。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -24,6 +28,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.dirname(HERE)
 const LAB = 'D:\\信息库\\AI工作区\\.tmp-shot-lab\\host'
+/** 夹具在 dev/ 里（见文件头那条说明）：产物目录会被清理，夹具不能待在那儿。 */
+const SCROLLER_PS1 = path.join(HERE, 'scroller.ps1')
 const SCRATCH = path.join(LAB, 'scratch')
 const LOG = path.join(SCRATCH, 'scroller.log')
 
@@ -110,17 +116,31 @@ try {
 // 于是窗口只能站右边这条 ~120px 的窄带 —— 窄不影响结论：长截图要的是"纵向真的滚动"。
 const WIN = { x: 1798, y: 130, w: 120, h: 880 }
 let scroller = null
+function scrollerStdio() {
+	/**
+	 * 夹具的输出**必须能看见**。原来是 `stdio:'ignore'`（管道在本沙箱里会 EPERM），
+	 * 代价是脚本一启动就报错时，自检只会说一句"测试窗口没起来"，看不到真正的原因
+	 * （本轮就栽过：pwsh 7 下 C# 编译不过，报的却是这条）。
+	 * 改成重定向到 SCRATCH 下的两个文件 —— 不是管道，所以不会 EPERM。
+	 */
+	try {
+		fs.mkdirSync(SCRATCH, { recursive: true })
+		const fd = fs.openSync(path.join(SCRATCH, 'scroller-console.log'), 'a')
+		return ['ignore', fd, fd]
+	} catch {
+		return 'ignore'
+	}
+}
 function startScroller() {
 	scroller = spawn(
 		shot.findPwsh(),
 		[
-			'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(LAB, 'scroller.ps1'),
+			'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SCROLLER_PS1,
 			'-X', String(WIN.x), '-Y', String(WIN.y), '-W', String(WIN.w), '-H', String(WIN.h),
 			'-Control', CONTROL, '-Info', INFO, '-Log', LOG,
 		],
-		// 注意：**不能** detached —— 实测 detached 起的 pwsh 会立刻 exit 0（窗口根本没建），
-		// 非 detached + stdio:'ignore' 才正常。
-		{ windowsHide: false, stdio: 'ignore' }
+		// 注意：**不能** detached —— 实测 detached 起的 pwsh 会立刻 exit 0（窗口根本没建）。
+		{ windowsHide: false, stdio: scrollerStdio() }
 	)
 	scroller.unref()
 }
@@ -316,15 +336,30 @@ if (!visible) {
 	manualFrames = mid.frames
 	manualSingle = Number(mid.height) || 0
 
-	// 3.4 「＋」立刻接一帧（用户手动按按钮那条路）：滚一下再按，必须当场多一帧。
+	// 3.4 「＋」立刻接一帧（用户手动按按钮那条路）：滚一下再按。
+	//
+	// ⚠️ 这条断言**不能**写成"必须 +1"：manual 循环的 tick 从 1.5s 降到 **0.15s**（R22 把
+	//    hitTest 搬进常驻助手）之后，`sleep(1200)` 这 1.2 秒**已经够后台循环把新画面收进去了**，
+	//    于是 add 抓到的是同一张图 —— 这不是产品缺陷，恰恰是"同一画面不重复拼"的契约在生效。
+	//    所以判据改成两条**不依赖竞态**的不变量：
+	//      ① add 不许凭空造帧，也不许在内容真的变了时静默不动（frames ∈ {N, N+1}，且与 stalled 自洽）；
+	//      ② 紧接着再 add 一次（画面没再变）必须是 stalled —— 重复帧绝不能进长图。
 	setOffset(1600)
 	await sleep(1200)
 	const beforeAdd = (await scroll.scrollStatus()).frames
 	const added = await svc.scroll(RECT, JSON.stringify({ session: 'add' }))
+	const addFrames = Number(added.frames) || 0
+	const addSelfConsistent = added.stalled === 1 ? addFrames === beforeAdd : addFrames === beforeAdd + 1
 	check(
-		'3.4 {session:add} 立刻接一帧',
-		added.ok === true && Number(added.frames) === beforeAdd + 1,
-		`frames ${beforeAdd} -> ${added.frames} paused="${added.paused}" stalled=${added.stalled} err=${added.error}`
+		'3.4 {session:add} 立刻接一帧（不重复、不静默）',
+		added.ok === true && addFrames >= beforeAdd && addFrames <= beforeAdd + 1 && addSelfConsistent,
+		`frames ${beforeAdd} -> ${addFrames} stalled=${added.stalled}（stalled=1 表示后台循环已先收走同一张，正常）`
+	)
+	const dup = await svc.scroll(RECT, JSON.stringify({ session: 'add' }))
+	check(
+		'3.4b 画面没再变时 add 必须 stalled（重复帧不许进长图）',
+		dup.ok === true && dup.stalled === 1 && Number(dup.frames) === addFrames,
+		`frames ${addFrames} -> ${dup.frames} stalled=${dup.stalled}`
 	)
 
 	// 会话期间区域一直被别的窗口盖着（用户全屏）时，"接帧 + 拼接"根本没有发生的机会 ——

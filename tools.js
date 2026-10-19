@@ -18,6 +18,16 @@
 
 import { capture, listWindows, toDataUrl } from './lib/shot.mjs'
 import { queueDeliver } from './lib/bus.mjs'
+import { gateRun, bridgeStatus, bridgeSend, bridgeResults, WORKSPACE } from './lib/devtools.mjs'
+
+/** 把任意值收敛成 lossless JSON（宿主对工具输出会做往返校验，undefined 会让整次调用失败）。 */
+function lossless(value) {
+	try {
+		return JSON.parse(JSON.stringify(value))
+	} catch {
+		return null
+	}
+}
 
 /** 工具统一输出声明：对象 schema + 文本渲染。 */
 const TOOL_OUTPUT = {
@@ -227,6 +237,123 @@ export function buildShotTools(deps = {}) {
 					windows: wins,
 					error: '',
 					text: ['共 ' + wins.length + ' 个窗口：', ...lines].join('\n'),
+				}
+			},
+		},
+		/**
+		 * 开发期：**一条命令跑完全部闸门**。
+		 *
+		 * 为什么需要它：R20–R22 这三轮，同一套验证被拆成四个命令、分散在四份输出里，
+		 * 每跑一轮要 2–4 分钟，还要人肉对四份输出判绿。而它们之间还有**顺序与隔离**要求
+		 * （覆盖层自检必须把 `DSH_OVERLAY_DIR` 改道，否则会被应用常驻的那个助手抢走请求）。
+		 * 这个工具把这些约束固化下来，返回一张结论表。
+		 */
+		{
+			name: 'shot_gate',
+			description:
+				'dsh-screenshot 的验证闸门：一次跑完（静态契约 / 覆盖层端到端 / 一拍成本 / 长截图内容级 / 宿主全量）并给结论表。' +
+				'默认跑前两项（秒级）；host=true 会跑完整宿主自检（约 3 分钟，会起测试窗口）。' +
+				'覆盖层那一项自动把 DSH_OVERLAY_DIR 改道到 .tmp-shot-lab/gate-overlay，不会和正在运行的 DSH 抢请求目录。',
+			parameters: {
+				type: 'object',
+				properties: {
+					smoke: { type: 'boolean', description: '跑静态契约（.tools/dsh-shot-smoke.mjs）。默认 true。' },
+					overlay: { type: 'boolean', description: '跑覆盖层+服务层端到端（dev/ovl-selftest.mjs，约 30s）。默认 true。' },
+					tick: { type: 'boolean', description: '量一拍成本（.tools/dsh-shot-tick-bench.mjs）。默认 false。' },
+					host: { type: 'boolean', description: '跑完整宿主自检（dev/hosttest.mjs，约 3 分钟，会起测试窗口）。默认 false。' },
+					content: { type: 'string', description: '长截图内容级验收的矩形 "x,y,w,h"（需要桌面上一块可滚动的参照窗，如 testbed_refwin）。' },
+				},
+			},
+			output: { schema: { type: 'object', properties: RESULT_PROPERTIES }, render: TOOL_OUTPUT.render },
+			async execute(args) {
+				const raw = args !== null && typeof args === 'object' ? args : {}
+				const res = await gateRun({
+					smoke: raw.smoke !== false,
+					overlay: raw.overlay !== false,
+					tick: raw.tick === true,
+					host: raw.host === true,
+					content: typeof raw.content === 'string' ? raw.content : '',
+				})
+				return {
+					ok: res.ok === true,
+					passed: res.passed,
+					failed: res.failed,
+					checks: lossless(res.checks),
+					workspace: WORKSPACE,
+					error: res.ok ? '' : 'see checks',
+					text: res.text,
+				}
+			},
+		},
+		/**
+		 * 开发期：**驱动正在运行的 DSH**（AI 直连桥）。
+		 *
+		 * 客户端半边是这套插件里最难验证的一半（改了要热重载、沙箱注入不了鼠标、渲染进程
+		 * 控制台 AI 读不到）。插件自己开了一条独立通道：客户端每 1.2s 拉
+		 * `:8934/.tmp-vision/_ai/cmd.json`，执行 `ops`，把结果 POST 到 `:8935/_dump`。
+		 * 这个工具把"起静态口 → 写命令 → 等回执 → 解析 dump"这一串固定下来，
+		 * 于是"客户端改成什么样了"可以一条调用问清。
+		 *
+		 * ⚠️ 它会真的在用户的 DSH 里执行代码（默认 target=all 会让**每个并存的模块实例**都执行
+		 * 一次）。只用它做只读/无害的探测；会开窗的调用请带 `selfTest`。
+		 */
+		{
+			name: 'shot_bridge',
+			description:
+				'驱动正在运行中的 DSH 客户端（dsh-screenshot 的 AI 直连桥）：status 看通道与实例；' +
+				'send 执行 ops（state / eval / click / menu / dom / reset）并等回执；results 读最近的回执。' +
+				'静态口不通时会自动起一个（node .tools/devserver.mjs 8934）。改完 client.js 用它验证客户端是否真的热重载了。',
+			parameters: {
+				type: 'object',
+				properties: {
+					action: { type: 'string', enum: ['status', 'send', 'results'], description: '默认 status。' },
+					js: { type: 'string', description: 'send 的便捷写法：等价于 ops=[{op:"eval", js}]。脚本里可用 d = window.__dshotDebug。' },
+					ops: {
+						type: 'array',
+						items: { type: 'object' },
+						description: 'send 的完整写法：[{op:"state"},{op:"eval",js:"..."},{op:"click",text:"长截图"}]',
+					},
+					target: { type: 'string', description: "'all'（默认，所有并存实例）/ 'focused'（只有有焦点的那个）/ 具体实例 id。" },
+					waitMs: { type: 'number', description: '等回执的上限，默认 25000。' },
+					limit: { type: 'number', description: 'results 时最多返回几条，默认 10。' },
+					tag: { type: 'string', description: "results 时按 tag 过滤（如 'ai-result' / 'region-result'）。" },
+				},
+			},
+			output: { schema: { type: 'object', properties: RESULT_PROPERTIES }, render: TOOL_OUTPUT.render },
+			async execute(args) {
+				const raw = args !== null && typeof args === 'object' ? args : {}
+				const action = ['send', 'results'].includes(raw.action) ? raw.action : 'status'
+				if (action === 'status') {
+					const st = await bridgeStatus()
+					return {
+						ok: st.ok === true,
+						staticOk: st.staticOk === true,
+						dumpOk: st.dumpOk === true,
+						instances: lossless(st.instances),
+						recent: lossless(st.recent),
+						error: st.ok ? '' : 'bridge not fully reachable',
+						text: st.text,
+					}
+				}
+				if (action === 'results') {
+					const res = bridgeResults({ limit: raw.limit, tag: raw.tag })
+					return { ok: true, count: res.count, items: lossless(res.items), error: '', text: res.text }
+				}
+				let ops = Array.isArray(raw.ops) ? raw.ops : []
+				if (ops.length === 0 && typeof raw.js === 'string' && raw.js.trim() !== '') ops = [{ op: 'eval', js: raw.js }]
+				const res = await bridgeSend({
+					ops,
+					target: typeof raw.target === 'string' && raw.target !== '' ? raw.target : 'all',
+					waitMs: num(raw.waitMs) > 0 ? num(raw.waitMs) : 25_000,
+				})
+				return {
+					ok: res.ok === true,
+					seq: res.seq,
+					instances: lossless(res.instances),
+					results: lossless(res.results),
+					ms: res.ms,
+					error: res.error,
+					text: res.text,
 				}
 			},
 		},
