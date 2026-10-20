@@ -1543,29 +1543,14 @@ window.__ModuleLoader__.load({
 				 * 会以为截图坏了（屏幕上只剩桌面）。要截别的应用时在菜单里勾一下，之后就记住。
 				 */
 				hideSelf: false,
-				mode: 'desktop',
-				method: 'screen',
 				autoCopy: true,
 				autoAttach: true,
-				/**
-				 * 抓取范围。用户点名的三种：
-				 *   'desktop' 整个桌面（含别的软件）
-				 *   'window'  一个指定窗口（pickHwnd 有值就用它，否则 DSH 自己）
-				 *   'region'  先抓全屏、进覆盖层里自己框
-				 * 'pick' 不是持久值 —— 选完窗口会落回 'window'。
-				 */
-				range: 'desktop',
-				pickHwnd: 0,
-				pickTitle: '',
 				/** 全局热键守护进程（能在 DSH 外面按快捷键呼出）。 */
 				hotkeys: false,
-				/**
-				 * 用**原生覆盖层**（独立进程的全屏真窗口）还是应用内 DOM 覆盖层。
-				 * 原生那套能盖住别的应用、不依赖 DSH 在前台；DOM 那套功能更全（标注 / OCR / 贴图 / 长截图）。
-				 * M1 期间默认走原生，**原生不可用时自动回落**到 DOM（这就是回退开关）。
-				 * 想强制回 DOM：`__dshotDebug.setPref('nativeOverlay', false)`
-				 */
-				nativeOverlay: true,
+				// ⚠️ R33：`range` / `method` / `pickHwnd` / `pickTitle` / `nativeOverlay` / `mode`
+				// 已经删除 —— 它们只服务于**已取消的**"在 DSH 里渲染桌面截图"那条路径
+				// （按窗口句柄抓、PrintWindow 自绘、DOM 覆盖层）。截图现在一律在原生覆盖层里框，
+				// 老 localStorage 里的这些键在 loadPrefs 里被一次性清掉（见 prefsVer 迁移）。
 				/** 「最近用过的自定义颜色」，取色器旁边的快捷位。 */
 				customColors: [],
 				/** 点一下（不拖）时落下的马赛克块边长，原图像素。 */
@@ -1600,28 +1585,27 @@ window.__ModuleLoader__.load({
 				if (raw === null) return base
 				const parsed = JSON.parse(raw)
 				const merged = Object.assign(base, parsed && typeof parsed === 'object' ? parsed : {})
-				// 老版本只存了 mode（desktop/window），把它迁移成新的 range，别让用户
-				// 升级一次就把自己选过的范围丢掉。
-				if (parsed && typeof parsed === 'object' && parsed.range === undefined && typeof parsed.mode === 'string') {
-					merged.range = parsed.mode === 'window' ? 'window' : 'desktop'
-				}
 				if (!Array.isArray(merged.customColors)) merged.customColors = []
 				/**
-				 * R32 迁移：**改默认值对老用户无效**。
+				 * 设置迁移（一次，靠 `prefsVer` 记进度）。三条都踩过现场：
 				 *
-				 * `savePrefs` 每次都整份写回，所以老版本早就把当时的默认值 `recRegion:'screen'`
-				 * 一起存进了 localStorage。本机实测：默认值改成 'pick' 之后，热重载的客户端读回来
-				 * 仍是 'screen' —— 那不是用户的选择，是上一版的默认值被固化下来了。
-				 *
-				 * 用 `prefsVer` 只迁一次；迁过之后用户在菜单里切回"整个桌面"会被永久尊重。
+				 * ① **改默认值对老用户无效**（R32）：`savePrefs` 每次都整份写回，老版本早就把当时的
+				 *    默认值 `recRegion:'screen'` 固化进了 localStorage。实测：默认值改成 'pick'
+				 *    之后热重载，读回来仍是 'screen' —— 那不是用户的选择，是上一版的默认值。
+				 * ② ⚠️ **必须显式判 NaN**：`Number(undefined) < 32` 是 **false**（NaN 参与比较恒假），
+				 *    第一版写成那样，恰好漏掉"没有 prefsVer 的老用户" —— 而这正是要迁移的那批人。
+				 * ③ **删掉已取消功能留下的设置**（R33）：`range / method / pickHwnd / pickTitle /
+				 *    nativeOverlay / mode` 只服务于"在 DSH 里渲染桌面截图"那条路径。留着它们会
+				 *    让菜单摘要和调试面板看起来"还有第二种截图方式"，也会让 pickTitle 之类的旧值
+				 *    永远漂在存储里。删掉比忽略干净。
 				 */
 				const ver = Number(merged.prefsVer)
-				// ⚠️ 必须显式判 NaN：`Number(undefined) < 32` 是 **false**（NaN 参与比较恒假），
-				// 第一版就写成 `if (Number(...) < 32)`，于是"没有 prefsVer 的老用户"恰好漏过迁移 ——
-				// 而这正是需要迁移的那批人。
-				if (!Number.isFinite(ver) || ver < 32) {
-					merged.recRegion = 'pick'
-					merged.prefsVer = 32
+				if (!Number.isFinite(ver) || ver < 33) {
+					if (!Number.isFinite(ver) || ver < 32) merged.recRegion = 'pick'
+					for (const stale of ['range', 'method', 'pickHwnd', 'pickTitle', 'nativeOverlay', 'mode']) {
+						delete merged[stale]
+					}
+					merged.prefsVer = 33
 					try {
 						window.localStorage.setItem(LS_KEY, JSON.stringify(merged))
 					} catch {}
@@ -2027,11 +2011,18 @@ window.__ModuleLoader__.load({
 		function showRecPanel(info) {
 			document.querySelectorAll('.dshot-recpanel').forEach((n) => n.remove())
 			const path = String(info.path || '')
-			let dur = Math.max(0.2, Number(info.seconds) || 0)
+			/**
+			 * 时长优先用**文件自己的**（record('stop') 的 `duration`，ffprobe 给的），墙钟只作退路。
+			 * R33 现场：面板拿墙钟做 `dur`，于是第一张预览帧落在文件真正的结尾之后 ——
+			 * `-ss <末尾之后>` 在 ffmpeg 里是**退出码 0 且不产出文件**，界面就显示
+			 * "抽帧失败：frame produced no file"，看着像录屏坏了。
+			 */
+			let dur = Math.max(0.2, Number(info.duration) || Number(info.seconds) || 0)
 			let trimmed = path
 			let trimStart = 0
 			let trimEnd = dur
-			let nowAt = Math.max(0, dur - 0.05)
+			// 末尾留 0.2s：最后一帧附近的 seek 本来就脆（关键帧+解码边界），不必卡在最边上。
+			let nowAt = Math.max(0, dur - 0.2)
 			let lastFrame = null
 
 			const fmt = (s) => {
@@ -2305,6 +2296,23 @@ window.__ModuleLoader__.load({
 			return String(text).replace(new RegExp('(' + cjk + ') +(?=' + cjk + ')', 'g'), '$1')
 		}
 
+		/**
+		 * ⚠️⚠️ **LEGACY / 已取消（R33），文件里没有任何调用点** ⚠️⚠️
+		 *
+		 * 这是"在 DSH 窗口里渲染桌面截图"那一套：抓一张整屏位图 → 画进 canvas → 盖一层 DOM
+		 * 覆盖层（`position:fixed;inset:0`）让用户在**DSH 自己的窗口里**框选与标注。
+		 *
+		 * 为什么取消（用户 2026-10-20 明确要求）：
+		 *   ① 它只盖得住 DSH 的窗口 —— DSH 不在前台时根本看不见，框不到别的应用；
+		 *   ② canvas 是整屏**原始像素**，而窗口在 125% 缩放下只有 ~1268 CSS px ⇒ 能框到的
+		 *      只有屏幕左上角那一块；
+		 *   ③ 与原生覆盖层并存 = 两套标注 UI、两套坐标、两套回执，用户根本分不清自己在哪一套里。
+		 *
+		 * 现在截图 / 长截图 / OCR / 翻译**一律**走原生覆盖层（`doNativePick` / `doNativeRegion`），
+		 * 入口 `doShotEntry` 在原生不可用时**明说**而不是偷偷换成这一套。
+		 * 代码先留着只是为了它包含的标注/取色/贴图逻辑有考古价值；**不要重新接线**，
+		 * 要复用就把局部函数挑出去，别把整块挂回调用链。
+		 */
 		async function doCapture(kind) {
 			if (shot.api === null) {
 				// 用户实测的那句「截图没有效果」最可能就是走到这里：按钮在（槽注册不依赖
@@ -2433,13 +2441,14 @@ window.__ModuleLoader__.load({
 		 *
 		 * ⚠️ 这是一次**阻塞**调用：它在等人拖框，最长 180 秒。所以提示要挂住
 		 *    （和抓屏那次同样的教训：1.2 秒的提示配 3 秒的等待 = 用户以为坏了）。
-		 * ⚠️ 任何「不可用」都必须**自动回落**到 DOM 那套，而不是让用户点了一下什么也没发生。
+		 * ⚠️ R33 起**不再回落**到 DOM 那套（那条路径已被取消）：不可用时如实说明并返回，
+		 *    让用户知道"是宿主没重启"，而不是给他一个框不到目标应用的降级界面。
 		 */
 		async function doNativePick() {
 			if (shot.api === null || typeof shot.api.overlay !== 'function') {
 				postDiag('overlay-unavailable', { apiKeys: shot.api === null ? 0 : Object.keys(shot.api).length })
-				toast('原生覆盖层还没就绪（宿主需重启一次），先用应用内截图', 2600)
-				return doCapture('shot')
+				toast('截图需要宿主覆盖层：宿主半边还没重启（重启 DSH 一次即可）', 4600)
+				return
 			}
 			shot.diag.capCalls += 1
 			toast('拖一个矩形 → 可以标注 · Enter 复制 · Esc 取消', 60000)
@@ -2462,8 +2471,8 @@ window.__ModuleLoader__.load({
 			} catch (error) {
 				const msg = String((error && error.message) || error)
 				postDiag('overlay-call-failed', { error: msg })
-				toast('原生覆盖层调用失败，改用应用内截图：' + msg, 3200)
-				return doCapture('shot')
+				toast('框选失败：' + msg, 4200)
+				return
 			}
 			const spent = ((Date.now() - t0) / 1000).toFixed(1)
 			const picked = res !== null && res !== undefined && res.ok === true
@@ -2495,11 +2504,11 @@ window.__ModuleLoader__.load({
 				return
 			}
 			const reason = String((res && (res.reason || res.error)) || 'unknown')
-			// 助手不在 / 没就绪 / 半路死了：回落，别让用户白点一下
+			// 助手不在 / 没就绪 / 半路死了：如实说，**不回落**（R33：DOM 那条已取消）
 			if (reason === 'no-helper' || reason === 'not-ready' || reason.indexOf('helper') >= 0) {
-				postDiag('overlay-fallback', { reason: reason })
-				toast('原生覆盖层不可用，改用应用内截图', 2400)
-				return doCapture('shot')
+				postDiag('overlay-no-helper', { reason: reason })
+				toast('原生覆盖层起不来（' + reason + '）—— 重启 DSH 一次再试', 4200)
+				return
 			}
 			toast('没有框选到内容（' + reason + '）', 2200)
 		}
@@ -2514,15 +2523,20 @@ window.__ModuleLoader__.load({
 		const DSH_WINDOW_TITLE = 'DeepSeek Harness'
 
 		/**
-		 * 「截图」这一档的**唯一入口**：能出原生覆盖层就走原生，否则回落应用内那套。
+		 * 「截图」这一档的**唯一入口**：一律走原生覆盖层（独立进程的全屏真窗口）。
 		 *
-		 * 为什么要有这个函数：这个判据以前在**三个地方各抄了一遍**（菜单动作、相机按钮、
-		 * 应用内热键），而热键那一份抄漏了 —— 于是"按钮是原生的、Ctrl+Alt+A 还是 DOM 的"。
-		 * 判据本身必须是**运行时**的：宿主没重启时 `shot.api.overlay` 根本不存在，自动回落。
+		 * R33（用户要求）：**取消在 DSH 窗口里渲染桌面截图的那套**。以前这里会回落到
+		 * `doCapture('shot')`（canvas 冻结帧 + DOM 标注层），它有两条硬伤 —— 只能盖住 DSH
+		 * 自己的窗口（DSH 不在前台就看不见）、canvas 是整屏原始像素（125% 缩放下只能框到
+		 * 屏幕左上角一块）。保留回落等于"看起来能用、框不到你要的东西"。
+		 *
+		 * 于是现在的契约是：原生覆盖层不可用 → **说清楚**，不再偷偷换一套降级的界面。
+		 * （`doCapture` 的实现还在文件里，但已无任何调用点；标成 legacy 见 R33 交接。）
 		 */
 		function doShotEntry() {
-			if (prefs().nativeOverlay !== false && shot.api !== null && typeof shot.api.overlay === 'function') return doNativePick()
-			return doCapture('shot')
+			if (shot.api !== null && typeof shot.api.overlay === 'function') return doNativePick()
+			postDiag('shot-no-overlay', { apiKeys: shot.api === null ? 0 : Object.keys(shot.api).length })
+			toast('截图需要宿主覆盖层：宿主半边还没重启（或没起来），重启 DSH 一次即可', 4600)
 		}
 
 		/**
@@ -2540,14 +2554,13 @@ window.__ModuleLoader__.load({
 		 * @param {'scrollRegion'|'ocr'|'translate'} kind
 		 */
 		async function doNativeRegion(kind, opts) {
-			const fallback = () => void doCapture(kind)
 			// 仅测试：请求里带 selfTest，助手会程序化框一块再返回 —— 沙箱里没有人能拖鼠标。
 			// 产品调用点**一律不传** opts，所以这条只在 AI 直连桥里出现。
 			const selfTest = opts !== undefined && opts !== null && opts.selfTest === true
 			if (shot.api === null || typeof shot.api.overlay !== 'function') {
 				postDiag('region-unavailable', { kind: kind, apiKeys: shot.api === null ? 0 : Object.keys(shot.api).length })
-				toast('原生覆盖层还没就绪（宿主需重启一次），先用应用内取区域', 3000)
-				return fallback()
+				toast('这条功能要在原生覆盖层里框区域：宿主半边没起来（重启 DSH 一次）', 4200)
+				return
 			}
 			shot.diag.capCalls += 1
 			toast(
@@ -2579,8 +2592,8 @@ window.__ModuleLoader__.load({
 			} catch (error) {
 				const msg = String((error && error.message) || error)
 				postDiag('region-call-failed', { kind: kind, error: msg })
-				toast('原生取区域失败，改用应用内取区域：' + msg, 3200)
-				return fallback()
+				toast('框选失败：' + msg, 4200)
+				return
 			}
 			// 老宿主（没重启）不认识 regionOnly，会照常进标注阶段并回 reason:'picked'
 			// + 剪贴板 + 落盘。矩形照样是对的，所以**接受它** —— 总比让用户白框一次好，
@@ -2612,9 +2625,9 @@ window.__ModuleLoader__.load({
 			}
 			const reason = String((res && (res.reason || res.error)) || 'unknown')
 			if (reason === 'no-helper' || reason === 'not-ready' || reason.indexOf('helper') >= 0) {
-				postDiag('region-fallback', { kind: kind, reason: reason })
-				toast('原生覆盖层不可用，改用应用内取区域', 2400)
-				return fallback()
+				postDiag('region-no-helper', { kind: kind, reason: reason })
+				toast('原生覆盖层起不来（' + reason + '）—— 重启 DSH 一次再试', 4200)
+				return
 			}
 			toast('没有框到区域（' + reason + '）', 2200)
 		}
@@ -3059,10 +3072,8 @@ window.__ModuleLoader__.load({
 				void showWindowList()
 				return
 			}
-			setPref('range', 'window')
-			setPref('mode', 'window')
-			setPref('pickHwnd', Number(res.hwnd) || 0)
-			setPref('pickTitle', String(res.title || ''))
+			// R33：`range/mode/pickHwnd/pickTitle` 已随 DOM 截图路径一起取消（loadPrefs 会清掉）。
+			// 这个点选器也没有菜单入口了；保留它只为"万一重新接线"时能看到选中的是谁。
 			postDiag('pickwin-ok', {
 				hwnd: res.hwnd,
 				title: String(res.title || '').slice(0, 60),
@@ -3070,7 +3081,7 @@ window.__ModuleLoader__.load({
 				h: res.h,
 				child: res.child,
 			})
-			toast('已选中：' + String(res.title || res.hwnd).slice(0, 36) + '（' + res.w + '×' + res.h + '）', 3600)
+			toast('已选中：' + String(res.title || res.hwnd).slice(0, 36) + '（' + res.w + '×' + res.h + '）· 请在覆盖层里框它', 4200)
 		}
 
 		/**
@@ -3138,11 +3149,10 @@ window.__ModuleLoader__.load({
 				b.append(name, meta)
 				b.addEventListener('click', () => {
 					closePicker()
-					setPref('range', 'window')
-					setPref('pickHwnd', w.hwnd)
-					setPref('pickTitle', w.title)
-					toast('已选定窗口：' + (w.title || w.hwnd), 2000)
-					void doCapture('shot')
+					// R33：这个窗口选择器已经没有菜单入口（选窗口截图随 DOM 路径一起取消了）。
+					// 万一被重新接线，也只会走唯一入口（原生覆盖层），不会退回 DOM 那套。
+					toast('已选定窗口：' + (w.title || w.hwnd) + '（现在请在覆盖层里框它）', 2600)
+					doShotEntry()
 				})
 				grid.appendChild(b)
 			}
@@ -3287,7 +3297,7 @@ window.__ModuleLoader__.load({
 					target: target === undefined ? 'focused' : String(target),
 					instance: {
 						id: AI_BRIDGE.id,
-						build: 'R32',
+						build: 'R33',
 						born: AI_BRIDGE.born,
 						vw: window.innerWidth,
 						vh: window.innerHeight,
@@ -3406,10 +3416,14 @@ window.__ModuleLoader__.load({
 				return { op: 'menu', ok: true, rows: later.length > 0 ? later : now, rowsNow: now.length, rowsLater: later.length }
 			}
 			if (kind === 'capture') {
+				// R33：这条桥的 op 以前直接驱动**已取消的** DOM 截图路径（`doCapture`），
+				// 于是它会"成功"、界面上却弹出那套旧的窗口内覆盖层。现在只走唯一入口，
+				// 并且如实说明"这次是原生覆盖层"——覆盖层在**独立进程**里，拿不到 DOM 快照。
 				const k = String(op.kind || 'shot')
-				void doCapture(k)
+				if (k === 'shot') doShotEntry()
+				else void doNativeRegion(k === 'scroll' ? 'scrollRegion' : k)
 				await new Promise((r) => setTimeout(r, Number(op.settle) || 800))
-				return { op: 'capture', ok: true, kind: k, overlay: overlaySnapshot() }
+				return { op: 'capture', ok: true, kind: k, native: true }
 			}
 			if (kind === 'dom') {
 				const sels = Array.isArray(op.sels) ? op.sels.slice(0, 12) : []
@@ -3897,18 +3911,14 @@ window.__ModuleLoader__.load({
 			const sep = document.createElement('div')
 			sep.className = 'dshot-mi-sep'
 			menu.append(sep)
-			const rangeLabel = () => {
-				const r = prefs().range
-				if (r === 'window') return '范围：指定窗口（' + String(prefs().pickTitle || 'DSH 自己').slice(0, 14) + '）'
-				return '范围：整个桌面'
-			}
 			/** 收起时也要看得出当前状态，否则"更多设置"等于把状态藏起来了。 */
 			const settingsSummary = () => {
 				const q = prefs()
-				const parts = [q.range === 'window' ? '指定窗口' : '整个桌面']
+				const parts = []
 				if (q.hideSelf) parts.push('隐藏 DSH 界面')
 				if (q.hotkeys) parts.push('热键开')
 				if (q.scrollMode === 'auto') parts.push('长截图自动滚')
+				if (q.recRegion === 'pick') parts.push('录屏先框一块')
 				return parts.join(' · ')
 			}
 
@@ -3920,36 +3930,14 @@ window.__ModuleLoader__.load({
 					return s
 				}
 				return [
-					item(prefs().range === 'window' ? '🪟' : '🖥', rangeLabel(), '', (row) => {
-						const next = prefs().range === 'window' ? 'desktop' : 'window'
-						setPref('range', next)
-						if (next === 'desktop') {
-							setPref('pickHwnd', 0)
-							setPref('pickTitle', '')
-						}
-						row.querySelector('span:nth-child(2)').textContent = rangeLabel()
-						row.querySelector('span:first-child').textContent = next === 'window' ? '🪟' : '🖥'
-					}),
-					item('🎯', '选一个窗口来截…（在桌面上点选）', '', () => {
-						close()
-						void showWindowPicker()
-					}),
-					item('🔲', '这次自己框范围（抓全屏再框选）', '', () => {
-						close()
-						const keep = prefs().range
-						setPref('range', 'desktop')
-						void doCapture('shot')
-						setPref('range', keep)
-					}),
+					// R33：删掉了「范围 / 选窗口来截 / 自己框范围 / 抓窗方式」四项 ——
+					// 它们只对**已取消的**"在 DSH 里渲染桌面截图"那套有意义（旧路径按窗口句柄
+					// 抓屏、用 PrintWindow 自绘）。现在截图一律在原生覆盖层里框，范围和抓法由
+					// "框哪块"直接决定，留着这些开关只会让人以为还有第二种截图方式。
 					item(p.hideSelf ? '☑' : '☐', '截图时隐藏 DSH 界面', '', (row) => {
 						setPref('hideSelf', !prefs().hideSelf)
 						row.querySelector('span:first-child').textContent = prefs().hideSelf ? '☑' : '☐'
 					}, p.hideSelf),
-					item('⇄', '抓窗方式：' + (p.method === 'print' ? '窗口自绘（挡住也拍得到）' : '屏幕区域（快）'), '', (row) => {
-						setPref('method', prefs().method === 'print' ? 'screen' : 'print')
-						row.querySelector('span:nth-child(2)').textContent =
-							'抓窗方式：' + (prefs().method === 'print' ? '窗口自绘（挡住也拍得到）' : '屏幕区域（快）')
-					}),
 					item('⇕', '长截图方式：' + (prefs().scrollMode === 'auto' ? '程序自己滚' : '我自己滚'), '', (row) => {
 						setPref('scrollMode', prefs().scrollMode === 'auto' ? 'manual' : 'auto')
 						row.querySelector('span:nth-child(2)').textContent =
@@ -4040,7 +4028,7 @@ window.__ModuleLoader__.load({
 				if (more === null) openMore()
 				else closeMore()
 			})
-			moreRow.title = '范围 / 抓窗方式 / 热键 / 马赛克 / 长截图方式 / 诊断'
+			moreRow.title = '隐藏 DSH 界面 / 热键 / 马赛克 / 长截图方式 / 录屏范围 / 诊断'
 			moreRow.addEventListener('mouseenter', () => {
 				moreTimer = setTimeout(openMore, 140)
 			})
@@ -4107,10 +4095,17 @@ window.__ModuleLoader__.load({
 			React.useEffect(() => {
 				// 官方公开动作面就藏在 kit props 里（renderer 会把 kit spread 进条目 props）
 				shot.inputActions = props && props.inputActions ? props.inputActions : null
-				window.__dshScreenshot = { capture: () => doCapture('shot'), menu: () => openMenu(ref.current) }
+				const handle = { capture: () => doShotEntry(), menu: () => openMenu(ref.current) }
+				window.__dshScreenshot = handle
 				return () => {
 					shot.inputActions = null
-					if (window.__dshScreenshot && window.__dshScreenshot.menu) delete window.__dshScreenshot
+					/**
+					 * ⚠️ 只能删**自己那一个**（R33 实测）：热重载后新实例的 effect 先跑、旧实例的
+					 * cleanup 后跑，无条件 `delete window.__dshScreenshot` 会把新实例刚挂上的入口
+					 * 一起删掉 —— 症状是热重载之后 `__dshScreenshot` 凭空消失，AI 直连桥的
+					 * `menu` op 报 "no trigger button"，而按钮明明还在屏幕上。
+					 */
+					if (window.__dshScreenshot === handle) delete window.__dshScreenshot
 				}
 			}, [])
 
@@ -4207,7 +4202,7 @@ window.__ModuleLoader__.load({
 			//    所以给一个明确命名的钩子，而不是把内部状态散到 window 上。
 			window.__dshotDebug = {
 				/** 版本标记：AI 直连桥靠它判断"我改的这版到底加载了没有"（热重载有延迟）。 */
-				build: 'R32',
+				build: 'R33',
 				shot: shot,
 				prefs: prefs,
 				setPref: setPref,

@@ -285,11 +285,19 @@ function Get-ImageSize {
 function Invoke-FrameGrab {
   # One PNG at one timestamp. -ss BEFORE -i = input seek (accurate_seek default on):
   # frame exact, cost O(keyframe distance) instead of O(timestamp).
-  param([string]$Source, [double]$At, [string]$Dest, [int]$ScaleWidth)
+  # -FromEnd > 0 switches to `-sseof -<n>`: "n seconds before the end of the file". Needed because
+  # a plain -ss at/after the last frame silently produces nothing (exit code 0, no output file).
+  param([string]$Source, [double]$At, [string]$Dest, [int]$ScaleWidth, [double]$FromEnd = 0)
   $ffArgs = New-Object System.Collections.Generic.List[string]
-  foreach ($a in @('-hide_banner', '-nostdin', '-loglevel', 'error', '-ss', (Format-Seconds $At), '-i', $Source, '-frames:v', '1')) {
-    $ffArgs.Add($a)
+  foreach ($a in @('-hide_banner', '-nostdin', '-loglevel', 'error')) { $ffArgs.Add($a) }
+  if ($FromEnd -gt 0) {
+    $ffArgs.Add('-sseof')
+    $ffArgs.Add('-' + (Format-Seconds $FromEnd))
+  } else {
+    $ffArgs.Add('-ss')
+    $ffArgs.Add((Format-Seconds $At))
   }
+  foreach ($a in @('-i', $Source, '-frames:v', '1')) { $ffArgs.Add($a) }
   if ($ScaleWidth -gt 0) {
     $ffArgs.Add('-vf')
     $ffArgs.Add('scale=' + $ScaleWidth + ':-2')
@@ -338,6 +346,27 @@ function Invoke-Frame {
   $grab = Invoke-FrameGrab -Source $srcPath -At $Time -Dest $dstPath -ScaleWidth $Width
   if ($grab.code -ne 0) {
     throw ('frame failed (ffmpeg exit ' + $grab.code + '): ' + (Get-FirstLine $grab.err))
+  }
+  # MEASURED (R33): `-ss <t>` with t at (or past) the last frame exits with code 0 and writes
+  # NOTHING. The caller then reports "frame produced no file" -- which reads like a broken
+  # recording, while the recording is fine and the timestamp was simply the end of the file.
+  # That is exactly what the result panel did: it asked for `duration - 0.05` using WALL-CLOCK
+  # seconds, which is often a hair past the file's real end.
+  #
+  # So: treat "no file" as "that timestamp has no frame", and walk back. `-sseof -0.4` asks for
+  # "0.4s before the end", which is the reliable way to name the last decodable frame without
+  # knowing the exact duration.
+  if (-not (Test-Path -LiteralPath $dstPath)) {
+    $back = Invoke-FrameGrab -Source $srcPath -At $Time -Dest $dstPath -ScaleWidth $Width -FromEnd 0.4
+    if ($back.code -ne 0) {
+      throw ('frame failed (ffmpeg exit ' + $back.code + '): ' + (Get-FirstLine $back.err))
+    }
+  }
+  if (-not (Test-Path -LiteralPath $dstPath)) {
+    $first = Invoke-FrameGrab -Source $srcPath -At 0 -Dest $dstPath -ScaleWidth $Width
+    if ($first.code -ne 0) {
+      throw ('frame failed (ffmpeg exit ' + $first.code + '): ' + (Get-FirstLine $first.err))
+    }
   }
   if (-not (Test-Path -LiteralPath $dstPath)) { throw 'frame produced no file' }
   $box = Get-ImageSize -Path $dstPath

@@ -612,6 +612,23 @@ log('[5R] record 区域（框选一块录）')
 		rStop.ok === true && Number(rStop.width) === 320 && Number(rStop.height) === 200 && Number(rStop.duration) > 1.5,
 		`${rStop.width}x${rStop.height} duration=${rStop.duration} bytes=${kb(rStop.bytes)} err=${rStop.error}`
 	)
+	/**
+	 * ③ 末尾抽帧（R33 用户现场）：结果面板默认就在 `时长 - 0.05` 处取第一张预览帧，
+	 *    而 `ffmpeg -ss <末尾之后>` 是**退出码 0 + 不产出文件** —— 界面于是显示
+	 *    "抽帧失败：frame produced no file"，看着像录屏坏了。判据必须钉在**末尾时间点**上，
+	 *    中间时间点一直是好的（所以这个 bug 活到今天）。
+	 */
+	if (String(rStop.path ?? '') !== '' && Number(rStop.duration) > 0) {
+		const atEnd = await svc.record('frame', JSON.stringify({ path: rStop.path, time: Math.max(0, Number(rStop.duration) - 0.05), width: 520 }))
+		check(
+			'5R.5 末尾时间点也抽得到帧（-ss 落在末尾曾是"抽帧失败"）',
+			atEnd.ok === true && String(atEnd.dataUrl).startsWith('data:image/') && Number(atEnd.width) > 0,
+			`t=${(Number(rStop.duration) - 0.05).toFixed(2)} ${atEnd.width}x${atEnd.height} err=${atEnd.error}`
+		)
+		const mid = await svc.record('frame', JSON.stringify({ path: rStop.path, time: Math.max(0, Number(rStop.duration) / 2), width: 520 }))
+		check('5R.6 中点抽帧照常（回归对照臂）', mid.ok === true && String(mid.dataUrl).startsWith('data:image/'), `err=${mid.error}`)
+	}
+
 	if (String(rStop.path ?? '') !== '') {
 		await svc.record('discard', JSON.stringify({ path: rStop.path }))
 	}

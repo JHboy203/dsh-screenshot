@@ -6,14 +6,18 @@ QQ 同款截图，按钮挂在**对话输入框「语音」键旁边**（`conver
 
 | 菜单项 | 说明 |
 |---|---|
-| ✂ 截图 | 抓屏 → 框选 → 标注 → **贴进输入框 + 复制到剪贴板**（两条都做） |
-| ⏺ 录屏 | ffmpeg gdigrab 录制（H.264 + faststart）。**默认先框一块再录**（见下），右上角计时胶囊点「停止」收尾 |
+| ✂ 截图 | **一律在原生覆盖层里框选**（独立进程的全屏真窗口，能盖住别的应用）→ 标注 → **贴进输入框 + 复制到剪贴板** |
+| ⏺ 录屏 | ffmpeg gdigrab 录制（H.264 + faststart）。**默认先框一块再录**（见下），屏幕上有一圈红框标出边界，右上角计时胶囊点「停止」收尾 |
 | Aa 提取文字 | 框选后**离线 OCR**（Windows 自带引擎，不出本机），出可复制/可贴进输入框的文本面板 |
 | 译 屏幕翻译 | OCR 之后把文字（带翻译指令前缀）贴进输入框，交给 DSH 自己的模型翻 |
 | ⇕ 长截图 | 框选区域 → 宿主滚一屏抓一张 → 重叠区对齐拼接 → 长图回到标注界面 |
-| 范围 | 整个桌面 / 只截 DSH 窗口 |
 | ☐ 截图时隐藏 DSH 界面 | 原生覆盖层在**冻结桌面之前**把 DSH 窗口藏起来（QQ 同款），框完/取消后还原并回到前台；默认关，在「更多设置」里勾 |
-| 🪟 抓窗方式 | 屏幕区域（快）/ 窗口自绘 PrintWindow（被挡住也拍得到） |
+
+> **R33 起删掉了「范围 / 选一个窗口来截 / 自己框范围 / 抓窗方式」四项**，以及在 DSH 窗口里
+> 渲染桌面截图的那套（canvas + DOM 覆盖层）。它只能盖住 DSH 自己的窗口、在 125% 缩放下
+> 只能框到屏幕左上角一块 —— 留着它等于"看起来能用，框不到你要的东西"。现在唯一入口是原生
+> 覆盖层；不可用时**明说**（"重启 DSH 一次"），不再偷偷换成降级界面。老的
+> `range/method/pickHwnd/pickTitle/nativeOverlay` 设置由 `prefsVer` 迁移一次性清掉。
 
 标注工具：矩形 / 椭圆 / 箭头 / 画笔 / 文字 / 马赛克，八色 + 粗细滑杆，撤销重做（游标模型），
 Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击全屏。
@@ -47,14 +51,14 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 ## 自检
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 422 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 431 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
 宿主半边 + 真窗口的回归（**必须在宿主进程里跑**，沙箱里注入不了消息）：
 
 ```
-host_selfcheck({plugin:'dsh-screenshot'})                                        # 全量，68 项 / FAIL 必须 0
+host_selfcheck({plugin:'dsh-screenshot'})                                        # 全量，77 项 / FAIL 必须 0
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-target-probe.mjs'})    # 6 项：投递滚轮投给谁
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})        # 10 项：真藏一次 + 还原 + 几何不变
 ```
@@ -90,6 +94,20 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
    内部用**窗口 region 挖掉**（用 `TransparencyKey` 的那个版本实测屏幕上一个像素都不显示）。
    框起不来不影响录制。
 4. **录完必须收掉框**：`record('stop')` 会先落停止信号再杀进程，残留一个红框比不画更糟。
+
+## 录屏结果面板：为什么"抽一帧"会失败（R33）
+
+用户现场：录了 7.3 秒，面板显示 **0 KB**、"当前帧"空白、报 `moov atom not found`；
+换成一段正常的录屏，面板又报 `frame produced no file`。两条根因：
+
+1. **`ffmpeg -ss <t>` 落在末尾之后 = 退出码 0 且不产出文件**（不是报错！）。面板默认就在
+   `时长 - 0.05` 处取第一张预览帧，而时长用的是**墙钟**，常常比文件真正的结尾多几十毫秒。
+   现在：时长优先用文件自己的（`ffprobe`）；`Invoke-Frame` 在"没产出文件"时依次退到
+   `-sseof -0.4`（文件末尾前 0.4 秒）和 `t = 0` —— 末帧附近拿不到就退一步，而不是宣布失败。
+2. **0 字节的录屏以前会被当成成功**（文件存在、`recordStop` 返回 ok），于是界面开一个
+   "必然抽帧失败"的面板，看起来像截屏/录屏整个坏了。现在 `recordStop` 发现
+   `bytes === 0` 或时长 0 就**直接报错**，并把 ffmpeg 的 stderr 尾巴带出来 —— 那句话才是
+   下次能定位的线索。
 
 ## 投递滚轮的适用范围（R32 实测）
 
