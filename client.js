@@ -1606,6 +1606,26 @@ window.__ModuleLoader__.load({
 					merged.range = parsed.mode === 'window' ? 'window' : 'desktop'
 				}
 				if (!Array.isArray(merged.customColors)) merged.customColors = []
+				/**
+				 * R32 迁移：**改默认值对老用户无效**。
+				 *
+				 * `savePrefs` 每次都整份写回，所以老版本早就把当时的默认值 `recRegion:'screen'`
+				 * 一起存进了 localStorage。本机实测：默认值改成 'pick' 之后，热重载的客户端读回来
+				 * 仍是 'screen' —— 那不是用户的选择，是上一版的默认值被固化下来了。
+				 *
+				 * 用 `prefsVer` 只迁一次；迁过之后用户在菜单里切回"整个桌面"会被永久尊重。
+				 */
+				const ver = Number(merged.prefsVer)
+				// ⚠️ 必须显式判 NaN：`Number(undefined) < 32` 是 **false**（NaN 参与比较恒假），
+				// 第一版就写成 `if (Number(...) < 32)`，于是"没有 prefsVer 的老用户"恰好漏过迁移 ——
+				// 而这正是需要迁移的那批人。
+				if (!Number.isFinite(ver) || ver < 32) {
+					merged.recRegion = 'pick'
+					merged.prefsVer = 32
+					try {
+						window.localStorage.setItem(LS_KEY, JSON.stringify(merged))
+					} catch {}
+				}
 				return merged
 			} catch {
 				return base
