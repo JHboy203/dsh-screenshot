@@ -7,7 +7,7 @@ QQ 同款截图，按钮挂在**对话输入框「语音」键旁边**（`conver
 | 菜单项 | 说明 |
 |---|---|
 | ✂ 截图 | 抓屏 → 框选 → 标注 → **贴进输入框 + 复制到剪贴板**（两条都做） |
-| ⏺ 录屏 | ffmpeg gdigrab 整屏录制（H.264 + faststart），右上角计时胶囊点「停止」收尾 |
+| ⏺ 录屏 | ffmpeg gdigrab 录制（H.264 + faststart）。**默认先框一块再录**（见下），右上角计时胶囊点「停止」收尾 |
 | Aa 提取文字 | 框选后**离线 OCR**（Windows 自带引擎，不出本机），出可复制/可贴进输入框的文本面板 |
 | 译 屏幕翻译 | OCR 之后把文字（带翻译指令前缀）贴进输入框，交给 DSH 自己的模型翻 |
 | ⇕ 长截图 | 框选区域 → 宿主滚一屏抓一张 → 重叠区对齐拼接 → 长图回到标注界面 |
@@ -47,7 +47,7 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 ## 自检
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 415 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 422 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
@@ -62,6 +62,48 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 `hide-self-probe` 会**真的把 DSH 窗口藏起来约 1.5 秒**（覆盖层正盖着屏幕，所以看不见），
 用来验"藏"与"还原"两半；它同时证明还原**不会改动窗口的摆放**（用 `SW_RESTORE` 会悄悄把
 最大化窗口变回普通大小）。
+
+```
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
+                args:['-App','qt']})                                              # Qt 认不认投递滚轮
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
+                args:['-App','java']})                                            # Java(Swing) 认不认
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
+                args:['-Title','记事本']})                                        # 任何已开着的应用
+```
+
+## 区域录屏（R32）
+
+**默认就让人框一块**，而不是整屏：整屏录到不该录的东西代价更高，而"框一块"以前藏在
+右键菜单第十几行里、几乎没人知道它存在。菜单里「录制范围：每次框一块 / 整个桌面」可以切回去，
+选择会被记住。
+
+四件容易被忽略、但都会让这个功能"看起来坏了"的事：
+
+1. **奇数宽高会让 ffmpeg 当场死掉**（`width not divisible by 2`，留下 0 字节文件）。
+   人手拖框极容易拖出 801×601，所以宿主把宽高**向下取偶**，并且**回执里报实际录的尺寸**——
+   客户端显示的是真在录的 800×600，不是用户拖的那个数。
+2. **框到的区域小于 2×2 时明确报错**，绝不"那就整屏录"（那会把整个桌面录进去）。
+3. **屏幕上会画一圈红框**（`ps/recframe.ps1`）说明正在录哪一块 —— 框选覆盖层一关，
+   屏幕上再没有别的东西能说明边界在哪。红框画在**捕获矩形之外**，所以不会被录进视频；
+   内部用**窗口 region 挖掉**（用 `TransparencyKey` 的那个版本实测屏幕上一个像素都不显示）。
+   框起不来不影响录制。
+4. **录完必须收掉框**：`record('stop')` 会先落停止信号再杀进程，残留一个红框比不画更糟。
+
+## 投递滚轮的适用范围（R32 实测）
+
+auto 长截图不移动鼠标，而是 `PostMessage(WM_MOUSEWHEEL)` 给**点位下面的叶子控件**。已实测：
+
+| 应用类型 | 消息投给 | 结果 |
+|---|---|---|
+| WinForms | 叶子 TextBox | ✅ 首个可见行 0 → 3（R29） |
+| Chromium（DSH 自己） | 叶子 | ✅ scrollTop 180 → 349.6（R29） |
+| **Qt 5.15** | 顶层（Qt 一窗一 HWND） | ✅ 滚动条 0 → 9 |
+| **Java Swing（JDK 17）** | 顶层（Swing 一窗一 HWND） | ✅ 滚动条 0 → 189 |
+
+⚠️ 这两行的判据是**被测程序自己记的滚动条值**，不是"画面变了没有"——夹具的每一行内容
+长得一样，滚动后像素几乎不变（实测 pixel diff 0.0%），只看画面会得出"没滚动"的错误结论。
 
 改了 `ps/*.ps1` 要**重启 DSH**：抓屏助手在执行的那一刻就把脚本读完了，之后不会重读。
 （`host_selfcheck` 跑在另一个 node 进程里，它起的助手跟着自己消失，替代不了应用那个 ——

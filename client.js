@@ -1584,11 +1584,16 @@ window.__ModuleLoader__.load({
 				recClip: true,
 				/**
 				 * 录屏范围：
-				 *   'screen' 整个桌面（老行为，默认）
+				 *   'screen' 整个桌面（老行为）
 				 *   'pick'   每次开始录之前先用**原生覆盖层**框一块（只要矩形）
 				 * 宿主侧一直支持 `region`（`-offset_x/-offset_y/-video_size`），缺的只是这一头的取区域。
+				 *
+				 * ⚠️ 2026-10-20 R32 把默认值改成 **'pick'**（用户原话："我需要录像可以框定
+				 * 一部分区域录制"）。以前默认整屏，于是这个能力藏在右键菜单的第十几行、
+				 * 几乎没人发现；而整屏录到不该录的东西代价更高。整屏仍是一键之遥（菜单里切回来，
+				 * 选择会被记住）。
 				 */
-				recRegion: 'screen',
+				recRegion: 'pick',
 			}
 			try {
 				const raw = window.localStorage.getItem(LS_KEY)
@@ -1624,6 +1629,9 @@ window.__ModuleLoader__.load({
 			recording: false,
 			recTimer: null,
 			recStart: 0,
+			/** 这一轮录的是什么范围（"整屏" / "800×600"）。DSH 在别的窗口背后时，
+			 *  用户唯一能确认"我到底录了哪块"的地方就是这颗悬浮药丸 —— 必须写清楚。 */
+			recLabel: '',
 			/** 长截图会话的"收尾"入口：会话开着时热键再按一次 = 完成（见 runInvoke）。 */
 			longFinish: null,
 			prefs: null,
@@ -1894,7 +1902,7 @@ window.__ModuleLoader__.load({
 				const s = Math.round((Date.now() - shot.recStart) / 1000)
 				const mm = String(Math.floor(s / 60)).padStart(2, '0')
 				const ss = String(s % 60).padStart(2, '0')
-				pill._label.textContent = '录屏中 ' + mm + ':' + ss
+				pill._label.textContent = '录屏中 ' + mm + ':' + ss + (shot.recLabel ? ' · ' + shot.recLabel : '')
 			}
 			tick()
 			clearInterval(shot.recTimer)
@@ -1907,6 +1915,9 @@ window.__ModuleLoader__.load({
 			const selfTest = opts !== undefined && opts !== null && opts.selfTest === true
 			let region = ''
 			let regionText = '整屏'
+			/** 用户拖出来的原始宽高（用来对比"宿主实际录的"是不是被取偶了）。 */
+			let pickedW = 0
+			let pickedH = 0
 			if (prefs().recRegion === 'pick') {
 				toast('框住要录的区域 · Esc 取消', 60000)
 				const pick = await pickNativeRectOnly(selfTest)
@@ -1923,10 +1934,23 @@ window.__ModuleLoader__.load({
 					const r = pick.rect
 					region = [r.x, r.y, r.w, r.h].join(',')
 					regionText = r.w + '×' + r.h
+					pickedW = r.w
+					pickedH = r.h
 				}
 			}
 			const res = await shot.api.record('start', JSON.stringify({ fps: 15, audio: false, region }))
-			if (res.ok !== true) return toast('录屏启动失败：' + (res.error || '未知错误'))
+			if (res.ok !== true) return toast('录屏启动失败：' + (res.error || '未知错误'), 5000)
+			/**
+			 * **回执里的矩形才是真在录的那块**（R32）：宿主会把宽高向下取偶
+			 * （yuv420p 要求偶数，奇数会让 ffmpeg 当场死掉、留下 0 字节文件），
+			 * 所以用户拖的 801×601 实际录的是 800×600。显示用户拖的那个数就是在骗他。
+			 */
+			const rw = Number(res.width) || 0
+			const rh = Number(res.height) || 0
+			if (rw > 0 && rh > 0) {
+				regionText = rw + '×' + rh + (rw !== pickedW || rh !== pickedH ? '（取偶后）' : '')
+			}
+			shot.recLabel = regionText
 			shot.recording = true
 			shot.recStart = Date.now()
 			showRecPill()
@@ -1955,6 +1979,7 @@ window.__ModuleLoader__.load({
 			if (shot.api === null) return
 			const res = await shot.api.record('stop', '')
 			shot.recording = false
+			shot.recLabel = ''
 			clearInterval(shot.recTimer)
 			const pill = document.querySelector('.dshot-rec')
 			if (pill !== null) pill.remove()

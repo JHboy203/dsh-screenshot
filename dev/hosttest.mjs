@@ -581,6 +581,52 @@ let recPath = ''
 	}
 }
 
+/* ─────────────────── 5R. 区域录屏（R32） ─────────────────── */
+
+log('[5R] record 区域（框选一块录）')
+{
+	// ① 归一化：奇数宽高是**必然**会发生的事（人手拖框），而 libx264+yuv420p 见到奇数
+	//    会在 0.6 秒内死掉并留下 0 字节文件（实测：width not divisible by 2 (801x601)）。
+	const odd = shot.normalizeRecordRegion('801,601,801,601')
+	check(
+		'5R.0 奇数宽高向下取偶',
+		odd !== null && odd.w === 800 && odd.h === 600 && odd.adjusted === true && odd.text === '801,601,800,600',
+		JSON.stringify(odd)
+	)
+	check('5R.0b 太小的矩形直接判无效（不偷偷录整屏）', shot.normalizeRecordRegion('10,10,1,40') === null, '')
+	check('5R.0c 空区域 = 整屏', shot.normalizeRecordRegion('') === null && shot.normalizeRecordRegion(undefined) === null, '')
+
+	// ② 真的录一块 321x201（奇数）→ 回执与文件都必须报 320x200。
+	const REG = '320,200,321,201'
+	const rStart = await svc.record('start', JSON.stringify({ fps: 15, region: REG }))
+	check(
+		'5R.1 区域录屏能起来，且回执报的是取偶后的尺寸',
+		rStart.ok === true && Number(rStart.width) === 320 && Number(rStart.height) === 200 && rStart.region === '320,200,320,200',
+		`ok=${rStart.ok} region=${rStart.region} ${rStart.width}x${rStart.height} frame=${rStart.frame} err=${rStart.error}`
+	)
+	check('5R.2 屏幕上起了录屏框', rStart.frame === true, `frame=${rStart.frame}（false = 框没起来，但录屏不受影响）`)
+	await sleep(3000)
+	const rStop = await svc.record('stop', '')
+	check(
+		'5R.3 文件本身也是 320x200（ffprobe 复核，不是整屏）',
+		rStop.ok === true && Number(rStop.width) === 320 && Number(rStop.height) === 200 && Number(rStop.duration) > 1.5,
+		`${rStop.width}x${rStop.height} duration=${rStop.duration} bytes=${kb(rStop.bytes)} err=${rStop.error}`
+	)
+	if (String(rStop.path ?? '') !== '') {
+		await svc.record('discard', JSON.stringify({ path: rStop.path }))
+	}
+
+	// ③ 录完之后框必须消失（它盖在桌面上，残留一个红框比没有框更糟）。
+	await sleep(700)
+	const frameAlive = await shot
+		.run(shot.findPwsh(), ['-NoProfile', '-Command', "(Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -like '*recframe.ps1*' } | Measure-Object).Count"], { timeoutMs: 20_000 })
+		.then((r) => Number(String(r.stdout).trim()) || 0)
+		.catch(() => -1)
+	check('5R.4 record(stop) 之后录屏框进程已消失', frameAlive === 0, `残留 ${frameAlive} 个 recframe.ps1`)
+}
+
+
+
 /* ─────────────────── 6. 老的一次性路径已删除（R26） ─────────────────── */
 
 log('[6] 老自动路径 scroll(rect,"") —— R26 起是**明确拒绝**')
