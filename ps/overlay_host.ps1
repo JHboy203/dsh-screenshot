@@ -38,12 +38,16 @@
 #   never has to leave C#.
 #
 # PROTOCOL (file based -- this sandbox forbids CreatePipe, so no pipes anywhere)
-#   node writes   <Dir>\ovlreq-<callTag>.json   { timeoutSec, dim, png, tag }
+#   node writes   <Dir>\ovlreq-<callTag>.json   { timeoutSec, dim, png, tag,
+#                                                 hideSelf?, hideTitle? }
 #   we read it, delete it, run the picker, then write
 #                 <Dir>\ovlres-<callTag>.json   { ok, cancelled, x, y, w, h, clip,
 #                                                 png, ms, dpi, screenW, screenH,
 #                                                 capMs, repaint, shapes, reason,
-#                                                 error }
+#                                                 hidden, error }
+#   hideSelf: hide the window whose title contains hideTitle for the duration of the
+#   freeze (so the caller's own UI is not in the picture), put it back the moment the
+#   overlay is up. `hidden` in the result says whether a window was actually hidden.
 #   ready handshake: <Dir>\ready-<Tag>.json      written once Add-Type + DPI are done
 #   shutdown:        <Dir>/stop-<Tag>.flag       we see it, delete ready, exit
 #   <Tag> identifies THIS generation of the helper (never the same twice).
@@ -96,6 +100,82 @@ try { if ([OvlDpi]::SetProcessDpiAwarenessContext([IntPtr](-4))) { $script:dpiMo
 if ($script:dpiMode -eq 'none') { try { if ([OvlDpi]::SetProcessDpiAwarenessContext([IntPtr](-3))) { $script:dpiMode = 'per-monitor' } } catch { } }
 if ($script:dpiMode -eq 'none') { try { if ([OvlDpi]::SetProcessDPIAware()) { $script:dpiMode = 'system-aware' } } catch { } }
 Log ('dpi=' + $script:dpiMode)
+
+# ---- hiding the caller's own window before the freeze ("hide self", R30) ---------
+# Why it has to happen HERE and not in the overlay UI: the frame is frozen BEFORE the overlay
+# window exists, so a toggle drawn on the overlay would be too late -- the picture already
+# contains the caller. QQ behaves the same way: its main window is gone by the time you drag.
+#
+# Matching is by title (substring, case-insensitive) because that is how the rest of the plugin
+# finds DSH too (capture.ps1 -Target 'DeepSeek Harness'). A title that matches nothing is NOT an
+# error: hiding is a convenience, the capture itself must still work.
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class OvlWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  public static IntPtr FindVisible(string needle) {
+    if (needle == null || needle.Length == 0) return IntPtr.Zero;
+    IntPtr found = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      if (!IsWindowVisible(h)) return true;
+      StringBuilder sb = new StringBuilder(512);
+      GetWindowTextW(h, sb, 512);
+      string t = sb.ToString();
+      if (t.Length > 0 && t.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0) {
+        found = h;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+}
+'@
+
+# Still-hidden bookkeeping lives in script scope so the form's event handlers and the finally
+# block can all see it. Invariant: DSH must NEVER be left hidden by a failed capture.
+$script:selfHwnd = [IntPtr]::Zero
+$script:selfWasIconic = $false
+$script:selfHiddenNow = $false
+
+function Hide-SelfWindow([string]$needle) {
+  if ([string]::IsNullOrEmpty($needle)) { return $false }
+  $h = [OvlWin]::FindVisible($needle)
+  if ($h -eq [IntPtr]::Zero) { Log ('hide-self: no visible window matching "' + $needle + '"'); return $false }
+  $script:selfHwnd = $h
+  $script:selfWasIconic = [bool][OvlWin]::IsIconic($h)
+  [void][OvlWin]::ShowWindow($h, 0)     # SW_HIDE
+  $script:selfHiddenNow = $true
+  # Give the desktop a beat to repaint behind it: freezing immediately can catch a half-faded
+  # copy of the very window we just hid, which looks like a ghost rather than like "gone".
+  Start-Sleep -Milliseconds 260
+  Log ('hide-self: hid hwnd=' + $h.ToInt64() + ' iconic=' + $script:selfWasIconic)
+  return $true
+}
+
+# -ToFront is only safe AFTER the overlay closes: SetForegroundWindow while the overlay owns the
+# keyboard focus would steal it from the overlay, and Enter/Esc would stop working mid-annotation.
+function Restore-SelfWindow([switch]$ToFront) {
+  $h = $script:selfHwnd
+  if ($h -eq [IntPtr]::Zero) { return }
+  if ($script:selfHiddenNow) {
+    try {
+      if ($script:selfWasIconic) { [void][OvlWin]::ShowWindow($h, 6) }   # SW_MINIMIZE (it was iconic)
+      else { [void][OvlWin]::ShowWindow($h, 5) }                        # SW_SHOW (current placement)
+    } catch { }
+    $script:selfHiddenNow = $false
+    Log 'hide-self: restored'
+  }
+  if ($ToFront) { try { [void][OvlWin]::SetForegroundWindow($h) } catch { } }
+}
 
 # ---- the double-buffered, clip-aware form (see header for why it is C#) --------
 # NOTE: Add-Type in PS 5.1 compiles with the C# 5 compiler -- no string interpolation,
@@ -958,7 +1038,7 @@ while ($true) {
 
   $resFile = Join-Path $Dir ('ovlres-' + $callTag + '.json')
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  $res = @{ ok = $false; cancelled = $false; x = 0; y = 0; w = 0; h = 0; clip = $false; png = ''; ms = 0; dpi = $script:dpiMode; screenW = $vs.Width; screenH = $vs.Height; capMs = 0; repaint = 0; shapes = 0; labelsCount = 0; pinned = $false; regionOnly = $false; reason = ''; error = '' }
+  $res = @{ ok = $false; cancelled = $false; x = 0; y = 0; w = 0; h = 0; clip = $false; png = ''; ms = 0; dpi = $script:dpiMode; screenW = $vs.Width; screenH = $vs.Height; capMs = 0; repaint = 0; shapes = 0; labelsCount = 0; pinned = $false; regionOnly = $false; hidden = $false; reason = ''; error = '' }
 
   $timeoutSec = 120
   if ($null -ne $req.timeoutSec) { $timeoutSec = [int]$req.timeoutSec }
@@ -970,6 +1050,11 @@ while ($true) {
   if ($dim -gt 95) { $dim = 95 }
   $outPng = ''
   if ($null -ne $req.png) { $outPng = [string]$req.png }
+  # Hide-self (R30): hide the caller's own window for the duration of the freeze. The client
+  # sends its own window title; an empty title means "do not hide" (and is never an error).
+  $hideSelf = ($req.hideSelf -eq $true)
+  $hideTitle = ''
+  if ($null -ne $req.hideTitle) { $hideTitle = [string]$req.hideTitle }
 
   $script:ovTicks = $timeoutSec * 2
   $script:ovForm = $null
@@ -978,6 +1063,9 @@ while ($true) {
   $result = $null
 
   try {
+    # ---- hide the caller BEFORE the freeze, otherwise the frame contains it ----
+    if ($hideSelf) { $res.hidden = Hide-SelfWindow $hideTitle }
+
     # ---- freeze the whole virtual desktop BEFORE our window exists ----
     $capStart = $sw.ElapsedMilliseconds
     $raw = New-Object System.Drawing.Bitmap -ArgumentList $vs.Width, $vs.Height
@@ -1023,7 +1111,10 @@ while ($true) {
       $script:ovTicks = $script:ovTicks - 1
       if ($script:ovTicks -le 0) { try { $script:ovForm.Close() } catch { } }
     })
-    $form.Add_Shown({ $timer.Start() })
+    # The caller's window comes back the moment the overlay is on screen: the overlay covers
+    # the whole desktop, so showing it BEHIND the overlay is invisible to the user and means
+    # there is no window-missing gap at all. (Foreground is restored after the overlay closes.)
+    $form.Add_Shown({ try { Restore-SelfWindow } catch { }; $timer.Start() })
 
     # Test channel: when the request carries selfTest, paint three annotations
     # programmatically and confirm -- so the selection -> annotate -> render ->
@@ -1050,6 +1141,9 @@ while ($true) {
 
     [void]$form.ShowDialog()
     $timer.Dispose()
+    # Focus goes back to the window the user came from. Safe only now: while the overlay was
+    # alive, this would have stolen the keyboard from it (see Restore-SelfWindow).
+    Restore-SelfWindow -ToFront
     $res.repaint = [int]$form.Repaints
     $res.shapes = [int]$form.ShapeCount
 
@@ -1109,7 +1203,29 @@ while ($true) {
         $res.reason = 'too-small'
       } else {
         $selRect = $form.Selection
-        try { [System.Windows.Forms.Clipboard]::SetImage($result); $res.clip = $true } catch { Log ('clipboard: ' + $_.Exception.Message) }
+        # Clipboard isn't ours alone: another app can hold it open, and then OpenClipboard fails
+        # ("the requested clipboard operation failed") -- measured in R30, and it is TRANSIENT
+        # (a few dozen ms later it works). Retry instead of silently handing back an image the
+        # user thinks they copied. `clip` must stay truthful either way: the client now says
+        # "couldn't copy" instead of claiming success.
+        $clipTries = 0
+        $clipErr = ''
+        while ($clipTries -lt 4 -and -not $res.clip) {
+          $clipTries += 1
+          try {
+            [System.Windows.Forms.Clipboard]::SetImage($result)
+            $res.clip = $true
+          } catch {
+            $clipErr = $_.Exception.Message
+            Log ('clipboard attempt ' + $clipTries + ': ' + $clipErr)
+            if ($clipTries -lt 4) { Start-Sleep -Milliseconds 90 }
+          }
+        }
+        # Truthful reason when the copy did not happen: "the clipboard is held by another app" is
+        # a condition the caller must be able to SEE (the client says it, and the self-checks
+        # treat it as "resource busy", not as a product regression).
+        $res.clipTries = $clipTries
+        $res.clipError = $(if ($res.clip) { '' } else { $clipErr })
         if ($outPng) {
           try {
             $parent = Split-Path -Parent $outPng
@@ -1145,6 +1261,8 @@ while ($true) {
     $res.error = $_.Exception.Message
     Log ('pick failed: ' + $res.error)
   } finally {
+    # Last line of defence: a throw anywhere above must not leave the user's window hidden.
+    try { Restore-SelfWindow } catch { }
     try { if ($null -ne $script:ovForm) { $script:ovForm.Hide(); [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 150 } } catch { }
     try { if ($null -ne $script:ovForm) { $script:ovForm.Dispose() } } catch { }
     $script:ovForm = $null

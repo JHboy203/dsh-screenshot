@@ -1535,7 +1535,14 @@ window.__ModuleLoader__.load({
 
 		function loadPrefs() {
 			const base = {
-				hideSelf: true,
+				/**
+				 * 截图时把 DSH 自己的窗口藏起来（用户 2026-10-20 要的「可选是否隐藏 DSH 界面」）。
+				 *
+				 * ⚠️ 默认 **false**（R30 改的，以前是 true）：原生覆盖层现在真的会隐藏 DSH 了，
+				 * 而"老是看不到 DSH"是更糟的默认值 —— 想截 DSH 自己的内容（对话、图表）时
+				 * 会以为截图坏了（屏幕上只剩桌面）。要截别的应用时在菜单里勾一下，之后就记住。
+				 */
+				hideSelf: false,
 				mode: 'desktop',
 				method: 'screen',
 				autoCopy: true,
@@ -2396,9 +2403,16 @@ window.__ModuleLoader__.load({
 			try {
 				// 工具条文案由这里带过去：overlay_host.ps1 必须零非 ASCII 字节，
 				// 中文字面量只能走请求参数。顺序固定 = Rect/Arrow/Pen/Mosaic/Number/Text/Undo。
+				//
+				// hideSelf：**在冻结桌面之前**把 DSH 自己的窗口藏起来（QQ 同款）。冻结帧就是
+				// 用户接下来框的那张图，所以这个开关只能由助手在 CopyFromScreen 之前执行；
+				// 覆盖层上再放一个勾已经晚了（R30）。关掉时行为与以前完全一样。
 				res = await shot.api.overlay(180, JSON.stringify({
 					labels: ['矩形', '箭头', '画笔', '马赛克', '序号', '文字', '椭圆', '颜色', '撤销'],
-					hint: 'Enter 复制    P 贴图    Esc 后退    Ctrl+Z 撤销    X 线宽    C 颜色',
+					// 隐藏着的时候在提示行最前面说一句：否则用户只会看到"DSH 不见了"。
+					hint: (prefs().hideSelf === true ? '已隐藏 DSH 界面    ' : '') + 'Enter 复制    P 贴图    Esc 后退    Ctrl+Z 撤销    X 线宽    C 颜色',
+					hideSelf: prefs().hideSelf === true,
+					hideTitle: DSH_WINDOW_TITLE,
 				}))
 			} catch (error) {
 				const msg = String((error && error.message) || error)
@@ -2416,7 +2430,19 @@ window.__ModuleLoader__.load({
 			if (picked) {
 				// 落盘文件名来自宿主（默认 图片\DSH截图\shot-<时间>.png），只报文件名不报全路径
 				const saved = res.png ? String(res.png).split(/[\\/]/).pop() : ''
-				toast(res.w + '×' + res.h + ' 已复制到剪贴板' + (saved ? ' · 已存 ' + saved : '') + ' · ' + spent + 's', 3600)
+				// 隐藏成功与否**如实说**：res.hidden 是助手真的藏了一个窗口才为 true，
+				// 标题没匹配上（比如 DSH 标题被换了）不能假装藏过。
+				const hid = res.hidden === true ? ' · 已隐藏 DSH 界面' : ''
+				/**
+				 * 剪贴板也要**如实说**（R30）：助手写剪贴板可能失败（别的程序正占着剪贴板，
+				 * 实测报「所请求的剪贴板操作失败」）。以前这里不管 res.clip 真假都写
+				 * "已复制到剪贴板" —— 用户粘出来是旧内容，却没有任何线索。
+				 * 助手现在会重试 4 次；仍然失败就明说，并留一条诊断。
+				 */
+				const copied = res.clip === true
+				if (!copied) postDiag('clip-failed', { w: Number(res.w) || 0, h: Number(res.h) || 0, png: saved })
+				const clipText = copied ? ' 已复制到剪贴板' : ' 剪贴板被别的程序占用，这次没复制成功' + (saved ? '（图已存盘）' : '')
+				toast(res.w + '×' + res.h + clipText + (saved ? ' · 已存 ' + saved : '') + hid + ' · ' + spent + 's', copied ? 3600 : 4800)
 				return
 			}
 			if (res && res.cancelled === true) {
@@ -2432,6 +2458,15 @@ window.__ModuleLoader__.load({
 			}
 			toast('没有框选到内容（' + reason + '）', 2200)
 		}
+
+		/**
+		 * DSH 自己那个**原生窗口**的标题（用来让助手在冻结桌面之前把它藏起来）。
+		 *
+		 * 为什么是标题而不是句柄：渲染进程根本拿不到自己那个 HWND。整套插件找 DSH 也用标题
+		 * （`capture.ps1 -Target 'DeepSeek Harness'`、`hitwin.ps1`），这里保持同一个口径。
+		 * 助手做的是**子串**匹配，所以标题后面挂了会话名也照样命中。
+		 */
+		const DSH_WINDOW_TITLE = 'DeepSeek Harness'
 
 		/**
 		 * 「截图」这一档的**唯一入口**：能出原生覆盖层就走原生，否则回落应用内那套。
@@ -2479,7 +2514,23 @@ window.__ModuleLoader__.load({
 			const t0 = Date.now()
 			let res
 			try {
-				res = await shot.api.overlay(180, JSON.stringify(selfTest ? { regionOnly: true, selfTest: true } : { regionOnly: true }))
+				const extra = { regionOnly: true }
+				if (selfTest) extra.selfTest = true
+				/**
+				 * 隐藏 DSH（R30）：只对「框完立刻抓这块图」的两条路（OCR / 翻译）生效 ——
+				 * 冻结和随后的抓取用同一个 setting，框到的就是抓到的，不会出现"框的时候
+				 * 有 DSH、抓出来却是它背后的东西"。
+				 * 长截图（scrollRegion）**不隐藏**：它的帧由宿主会话逐拍抓，藏/显会在每拍
+				 * 制造闪烁，而且遮挡守卫本来就是按"屏幕上真实可见"判定的。
+				 */
+				if ((kind === 'ocr' || kind === 'translate') && prefs().hideSelf === true) {
+					extra.hideSelf = true
+					extra.hideTitle = DSH_WINDOW_TITLE
+					// 提示行必须跟着说：DSH 被藏起来之后屏幕上会"少一块"，
+					// 不说清楚，用户会以为覆盖层出错了。
+					extra.hint = '已隐藏 DSH 界面    框住要识别的区域 · Esc 取消'
+				}
+				res = await shot.api.overlay(180, JSON.stringify(extra))
 			} catch (error) {
 				const msg = String((error && error.message) || error)
 				postDiag('region-call-failed', { kind: kind, error: msg })
@@ -2533,8 +2584,13 @@ window.__ModuleLoader__.load({
 			toast('正在抓这块区域…', 60000)
 			let cap
 			try {
-				// hideSelf=1：这块区域是用户**在真实桌面上**框的，DSH 窗口可能正盖着它。
-				cap = await shot.api.cap('desktop', '1', 'screen', 0, rectText)
+				/**
+				 * hideSelf 跟**框选那一步**用同一个值（R30）：覆盖层的冻结帧就是用户看到的
+				 * 那张图，抓取必须和它一致 —— 冻结时藏了 DSH，抓取时也得藏，否则截出来的是
+				 * 用户没见过的画面（而 OCR 会把 DSH 背后的字识别出来）。
+				 * 以前这里写死 '1'，等于无论用户怎么选都藏 DSH。
+				 */
+				cap = await shot.api.cap('desktop', prefs().hideSelf === true ? '1' : '0', 'screen', 0, rectText)
 			} catch (error) {
 				toast('抓取区域失败：' + String((error && error.message) || error))
 				return
@@ -3186,7 +3242,7 @@ window.__ModuleLoader__.load({
 					target: target === undefined ? 'focused' : String(target),
 					instance: {
 						id: AI_BRIDGE.id,
-						build: 'R28',
+						build: 'R30',
 						born: AI_BRIDGE.born,
 						vw: window.innerWidth,
 						vh: window.innerHeight,
@@ -3805,7 +3861,7 @@ window.__ModuleLoader__.load({
 			const settingsSummary = () => {
 				const q = prefs()
 				const parts = [q.range === 'window' ? '指定窗口' : '整个桌面']
-				if (q.hideSelf) parts.push('隐藏自身')
+				if (q.hideSelf) parts.push('隐藏 DSH 界面')
 				if (q.hotkeys) parts.push('热键开')
 				if (q.scrollMode === 'auto') parts.push('长截图自动滚')
 				return parts.join(' · ')
@@ -3840,7 +3896,7 @@ window.__ModuleLoader__.load({
 						void doCapture('shot')
 						setPref('range', keep)
 					}),
-					item(p.hideSelf ? '☑' : '☐', '截图时隐藏当前窗口', '', (row) => {
+					item(p.hideSelf ? '☑' : '☐', '截图时隐藏 DSH 界面', '', (row) => {
 						setPref('hideSelf', !prefs().hideSelf)
 						row.querySelector('span:first-child').textContent = prefs().hideSelf ? '☑' : '☐'
 					}, p.hideSelf),
@@ -4013,7 +4069,7 @@ window.__ModuleLoader__.load({
 				}
 			}, [])
 
-			const title = ready ? '左键直接截图 · 右键更多（录屏 / 提取文字 / 长截图 / 设置）' : '截图服务未就绪（宿主半边没起来）'
+			const title = ready ? '左键直接截图 · 右键更多（录屏 / 提取文字 / 长截图 / 设置：隐藏 DSH 界面）' : '截图服务未就绪（宿主半边没起来）'
 
 			return h(
 				'span',
@@ -4106,7 +4162,7 @@ window.__ModuleLoader__.load({
 			//    所以给一个明确命名的钩子，而不是把内部状态散到 window 上。
 			window.__dshotDebug = {
 				/** 版本标记：AI 直连桥靠它判断"我改的这版到底加载了没有"（热重载有延迟）。 */
-				build: 'R28',
+				build: 'R30',
 				shot: shot,
 				prefs: prefs,
 				setPref: setPref,

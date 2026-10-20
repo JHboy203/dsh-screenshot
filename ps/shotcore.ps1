@@ -95,26 +95,54 @@ public class DshShot {
     mouse_event(MouseWheel, 0, 0, delta, UIntPtr.Zero);
   }
 
-  // --- wheel message addressed straight at a window (R27) ---
+  // --- wheel message addressed at the window the user would actually be pointing at (R27/R29) ---
   // Moving the real cursor + mouse_event works everywhere but hijacks the user's mouse and
-  // refuses to act while they are using it. WM_MOUSEWHEEL posted to the target window needs
-  // neither. Whether the app HONOURS it is app-specific (measured: Chromium does, WinForms
-  // routes by the REAL cursor position) - so the caller must verify by looking at the captured
+  // refuses to act while they are using it. A WM_MOUSEWHEEL message needs neither. Whether the
+  // app HONOURS it is app-specific, so the caller must verify by looking at the captured
   // pixels. A successful PostMessage proves NOTHING about the app's behaviour.
+  //
+  // R27 posted it at the TOP-LEVEL window. Measured in R29 (dev/wheel-target-probe.mjs, a real
+  // WinForms TextBox that logs its own scroll position): a message addressed to the top-level
+  // form only raises the form's MouseWheel and NOTHING scrolls; addressed to the control under
+  // the point it scrolls. Chromium accepts both, so addressing the leaf is strictly better --
+  // and it is exactly the window a real wheel would land on (WindowFromPoint).
+  //
+  // Safety: if the leaf under (x,y) no longer belongs to the expected top-level window, REFUSE
+  // and post nothing. Scrolling a window we were not asked to scroll is worse than not
+  // scrolling: the auto session would silently capture somebody else's pixels.
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
   public const uint MouseWheelMessage = 0x020A;
+  /** Which hwnd the last PostWheel really addressed (0 = nothing was posted). For diagnostics. */
+  public static long WheelTarget = 0;
+  /** False when the last PostWheel refused because the point was no longer over the target. */
+  public static bool WheelPointOverTarget = true;
+
+  public static IntPtr LeafAt(int x, int y) {
+    POINT p; p.X = x; p.Y = y;
+    return WindowFromPoint(p);
+  }
 
   // wParam = (delta << 16) | keyState, lParam = (y << 16) | (x & 0xFFFF) in SCREEN pixels.
   // Returns "at least one PostMessage was accepted" - not "the app scrolled".
   public static bool PostWheel(IntPtr h, int x, int y, int delta, int times) {
+    WheelTarget = 0;
+    WheelPointOverTarget = true;
     if (h == IntPtr.Zero) return false;
+    IntPtr leaf = LeafAt(x, y);
+    IntPtr root = leaf == IntPtr.Zero ? IntPtr.Zero : GetAncestor(leaf, 2);
+    if (root != h) {
+      WheelPointOverTarget = false;
+      return false;
+    }
+    IntPtr target = leaf;
     IntPtr wp = new IntPtr(delta * 65536);
     IntPtr lp = new IntPtr(((y & 0xFFFF) << 16) | (x & 0xFFFF));
     bool any = false;
     int n = times < 1 ? 1 : times;
     for (int i = 0; i < n; i++) {
-      if (PostMessage(h, MouseWheelMessage, wp, lp)) any = true;
+      if (PostMessage(target, MouseWheelMessage, wp, lp)) any = true;
     }
+    if (any) WheelTarget = target.ToInt64();
     return any;
   }
 

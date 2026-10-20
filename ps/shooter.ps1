@@ -201,10 +201,16 @@ while ($true) {
         $out['moved'] = [bool]$moved
         $out['x'] = $wx; $out['y'] = $wy; $out['delta'] = $wd; $out['times'] = $times
       } elseif ($kind -eq 'postwheel') {
-        # Wheel message addressed straight at the target window: NO cursor move, no focus
-        # change. Used by the auto long screenshot first (R27); the caller decides whether the
-        # app honours it by comparing captured frames, so `posted` only means "accepted by
-        # user32" - never "the page scrolled".
+        # Wheel message addressed at the control under the region centre (R27, leaf-targeting
+        # since R29): NO cursor move, no focus change. Used by the auto long screenshot first;
+        # the caller decides whether the app honours it by comparing captured frames, so
+        # `posted` only means "accepted by user32" - never "the page scrolled".
+        #
+        # `target` is the hwnd actually addressed (0 when refused): a WinForms scroll area only
+        # reacts when the message goes to the control under the point, not to the top-level form.
+        # `reason` separates "the point is no longer over the window we were told to scroll"
+        # (transient - the caller should re-guard) from "user32 rejected it" (permanent - the
+        # caller should stop posting and use the cursor method).
         $ph = [long]0; $px = 0; $py = 0; $pd = 0; $pt = 1
         try { $ph = [long]$req.hwnd } catch { $ph = 0 }
         try { $px = [int]$req.x } catch { $px = 0 }
@@ -213,10 +219,24 @@ while ($true) {
         try { $pt = [Math]::Max(1, [Math]::Min(20, [int]$req.times)) } catch { $pt = 1 }
         $posted = $false
         if ($ph -gt 0) { $posted = [DshShot]::PostWheel([IntPtr]::new($ph), $px, $py, $pd, $pt) }
+        $targetHwnd = [long]0
+        try { $targetHwnd = [long][DshShot]::WheelTarget } catch { $targetHwnd = 0 }
+        $overTarget = $true
+        try { $overTarget = [bool][DshShot]::WheelPointOverTarget } catch { $overTarget = $true }
         $out['ok'] = [bool]$posted
         $out['posted'] = [bool]$posted
+        $out['target'] = $targetHwnd
+        $out['overTarget'] = [bool]$overTarget
         $out['hwnd'] = $ph; $out['x'] = $px; $out['y'] = $py; $out['delta'] = $pd; $out['times'] = $pt
-        if (-not $posted) { $out['error'] = 'PostMessage(WM_MOUSEWHEEL) rejected' }
+        if (-not $posted) {
+          if (-not $overTarget) {
+            $out['reason'] = 'point-moved'
+            $out['error'] = 'the point is no longer over the target window; nothing was posted'
+          } else {
+            $out['reason'] = 'rejected'
+            $out['error'] = 'PostMessage(WM_MOUSEWHEEL) rejected'
+          }
+        }
       } else {
       $mode = 'desktop'
       if ([string]$req.mode -eq 'window') { $mode = 'window' }

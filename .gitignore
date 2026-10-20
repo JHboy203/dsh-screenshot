@@ -9,6 +9,12 @@ build/
 coverage/
 *.log
 *.bak-*
+
+# 根目录散落的截图/录制产物（自检与手测留痕，不是源码）
+/*.png
+/*.jpg
+/*.mp4
+
 .DS_Store
 Thumbs.db
 

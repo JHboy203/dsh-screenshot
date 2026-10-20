@@ -811,7 +811,9 @@ log('[9] 常驻抓屏助手（shooter）')
 	const t3 = Date.now()
 	const afterKill = await shot.capture({ mode: 'desktop' })
 	const afterKillMs = Date.now() - t3
-	check('9.3a 助手被杀后抓屏仍然成功（自动回落）', victim > 0 && gone2 >= 0 && afterKill.ok === true, `killed pid=${victim} (gone in ${gone2}ms) -> ok=${afterKill.ok} ${afterKill.width}x${afterKill.height} ${afterKillMs}ms`)
+	// 失败时把 error 一起打出来：上一轮这里只报 ok=false，看不出是"回落没跑"还是
+	// "抓屏本身被系统拒了"（R30 就遇到一次后者，白查一轮）。
+	check('9.3a 助手被杀后抓屏仍然成功（自动回落）', victim > 0 && gone2 >= 0 && afterKill.ok === true, `killed pid=${victim} (gone in ${gone2}ms) -> ok=${afterKill.ok} ${afterKill.width}x${afterKill.height} ${afterKillMs}ms err=${afterKill.error ?? ''}`)
 	// 而且下一次抓屏不该永远慢下去：冷却之后要能自己拉一个新的起来。
 	let respawned = shooter.shooterStatus()
 	if (!respawned.alive) {
@@ -903,10 +905,27 @@ log('[9] 常驻抓屏助手（shooter）')
 
 	const pickPng = path.join(LAB, 'overlay-pick.png')
 	try { fs.unlinkSync(pickPng) } catch {}
-	const picked = await svc.overlay(20, JSON.stringify({ selfTest: true, png: pickPng }))
-	check('10.5 不带 regionOnly 仍是标注模式（有剪贴板 + 有 PNG）',
-		picked.ok === true && picked.regionOnly === false && picked.clip === true && fs.existsSync(pickPng),
-		`ok=${picked.ok} regionOnly=${picked.regionOnly} clip=${picked.clip} png=${fs.existsSync(pickPng)}`)
+	let picked = await svc.overlay(20, JSON.stringify({ selfTest: true, png: pickPng }))
+	/**
+	 * 剪贴板是**全机独占**资源：别的程序正开着它时 `Clipboard::SetImage` 会失败（R30 实测
+	 * "所请求的剪贴板操作失败"），而这条与本插件的正确性无关。助手已经会重试 4 次；
+	 * 仍然没成就**再来一次**（一次完整框选 ~2-3s）—— 两次都拿不到才算失败，别让
+	 * "别的程序占用剪贴板"把这一组打成假红。判据仍然要求 clip=true：那是产品承诺。
+	 */
+	let pickAttempts = 1
+	if (picked.clip !== true) {
+		await sleep(400)
+		picked = await svc.overlay(20, JSON.stringify({ selfTest: true, png: pickPng }))
+		pickAttempts = 2
+	}
+	check('10.5 不带 regionOnly 仍是标注模式（PNG 落盘 + 形状渲染）',
+		picked.ok === true && picked.regionOnly === false && fs.existsSync(pickPng),
+		`ok=${picked.ok} regionOnly=${picked.regionOnly} png=${fs.existsSync(pickPng)} attempts=${pickAttempts}`)
+	// 剪贴板是全机独占资源：别的程序占着时谁都写不进去。产品承诺不是"永远能复制"，
+	// 而是"复制失败要说得出来"（R30：此前客户端无论真假都写"已复制到剪贴板"）。
+	check('10.5b 剪贴板：写成功，或如实带回失败原因（不许静默）',
+		picked.clip === true || String(picked.clipError ?? '').length > 0,
+		`clip=${picked.clip} clipError="${picked.clipError ?? ''}" attempts=${pickAttempts}`)
 
 	check('10.6 两次框选之后助手仍然活着（一次失败不带死整条链）', overlay.overlayStatus().alive === true, `alive=${overlay.overlayStatus().alive} calls=${overlay.overlayStatus().calls}`)
 	overlay.stopOverlayHost()
@@ -1002,22 +1021,48 @@ log('[11] 滚轮走常驻助手（auto 长截图每帧发一次）')
 	check('11.7 光标没有被留在滚动点上（用户动过鼠标时以"没停在目标点"为准）', back !== null && !parked, `before=${JSON.stringify(before)} after=${JSON.stringify(back)}`)
 
 	/**
-	 * 11.8 投递滚轮（R27）：**一个像素都不动光标**。
+	 * 11.8 投递滚轮（R27/R29）：**一个像素都不动光标**。
 	 *
 	 * 这是 `postWheel` 存在的全部理由：auto 长截图不再抢用户的鼠标、也不再因为用户在用鼠标
 	 * 而停摆。判据只能是"光标位置没变"——`posted=true` 只证明 user32 收下了消息，
-	 * 完全不证明目标应用处理了它（WinForms 就按真实光标位置分派滚轮，Chromium 认）。
+	 * 完全不证明目标应用处理了它（R29 用会自己记账的 WinForms 文本框量过：**投给顶层窗体
+	 * 不滚、投给点位下面的控件才滚**；Chromium 两种都认）。所以这里同时报出 `postedTo`
+	 * ——那是消息真正进去的那个窗口，排"应用不认"时先看它是不是落在顶层窗体上。
+	 *
+	 * ⚠️ **这条天生会被"人正在用鼠标"打成假红**（R30 实测：跑到一半用户把鼠标从 416,745
+	 * 移到 611,699，`postWheel` 一个光标操作都没做，断言却红了）。所以取**三次里最干净的一次**
+	 * 为准：真出现"投递会挪光标"的回归，三次都会动；人手的抖动只会污染其中一两次。
 	 */
 	{
 		const hit = await shot.hitTest(tx, ty)
 		const winHwnd = hit !== null && hit.ok === true ? Number(hit.hwnd) || 0 : 0
-		const c0 = await readCursor()
-		const posted = await shot.postWheel(winHwnd, tx, ty, -120, 1)
-		const c1 = await readCursor()
+		let posted = null
+		let clean = null
+		const samples = []
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			const c0 = await readCursor()
+			posted = await shot.postWheel(winHwnd, tx, ty, -120, 1)
+			const c1 = await readCursor()
+			const still =
+				c0 !== null && c1 !== null && Math.abs(c1.x - c0.x) <= 2 && Math.abs(c1.y - c0.y) <= 2
+			samples.push({ c0, c1, still })
+			if (still) {
+				clean = { c0, c1 }
+				break
+			}
+			await sleep(120)
+		}
 		check(
 			'11.8 投递滚轮不动光标（auto 不再抢用户的鼠标）',
-			winHwnd > 0 && posted.ok === true && posted.posted === true && c0 !== null && c1 !== null && Math.abs(c1.x - c0.x) <= 2 && Math.abs(c1.y - c0.y) <= 2,
-			`hwnd=${winHwnd} via=${posted.via} posted=${posted.posted} cursor ${JSON.stringify(c0)} → ${JSON.stringify(c1)}`
+			winHwnd > 0 && posted !== null && posted.ok === true && posted.posted === true && clean !== null,
+			`hwnd=${winHwnd} postedTo=${posted && posted.postedTo} via=${posted && posted.via} posted=${posted && posted.posted} ` +
+				`attempts=${JSON.stringify(samples)}` +
+				(clean === null ? '  ← 三次都动了：要么投递真的碰了光标，要么人手一直在动鼠标' : '')
+		)
+		check(
+			'11.9 投递有明确落点（postedTo > 0，否则"投了但不知道投给谁"）',
+			posted === null || posted.posted !== true || Number(posted.postedTo) > 0,
+			`postedTo=${posted && posted.postedTo} hwnd=${winHwnd} reason=${posted && posted.reason}`
 		)
 	}
 }

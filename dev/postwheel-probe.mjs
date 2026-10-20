@@ -4,8 +4,14 @@
 //   host_selfcheck({plugin:'dsh-screenshot', script:'dev/postwheel-probe.mjs',
 //                   args:['-Hwnd','123456','-Delta','-360']})
 //
+// -Hwnd 必须是**顶层窗口**（`win_windows` / `hitTest` 给的那种），不是子控件：
+// R29 起 postwheel.ps1 用 `WindowFromPoint(X,Y)` 自己解析出点位下的叶子控件再投，
+// 并核对它的根是不是 -Hwnd ——给一个子控件句柄会被判"点位不在目标窗口上"而拒绝。
+// 要复现 R27 的老行为（直接投给 -Hwnd 本身）加 `-Root`。
+//
 // 它不做任何"验证 UI"的动作：只把一条 WM_MOUSEWHEEL 发给指定窗口，回一行 JSON。
 // 真正的对照实验在外面做：client_eval 读 scrollTop → 跑这个 → 再读 scrollTop。
+// 要验"某个真实应用认不认"，用 dev/wheel-target-probe.mjs（带地面真值与对照臂）。
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -39,11 +45,14 @@ if (hwnd <= 0) {
 	title = hit.title
 }
 
+const resolve = argv.includes('-Root') ? 'root' : 'leaf'
+
 const res = await shot.run(
 	shot.findPwsh(),
 	[
 		'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(PLUGIN, 'ps', 'postwheel.ps1'),
 		'-Hwnd', String(hwnd), '-Delta', String(delta), '-Times', String(times), '-X', String(xIn), '-Y', String(yIn),
+		'-Resolve', resolve,
 	],
 	{ timeoutMs: 20_000 }
 )

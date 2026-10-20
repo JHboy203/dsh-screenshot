@@ -12,7 +12,7 @@ QQ 同款截图，按钮挂在**对话输入框「语音」键旁边**（`conver
 | 译 屏幕翻译 | OCR 之后把文字（带翻译指令前缀）贴进输入框，交给 DSH 自己的模型翻 |
 | ⇕ 长截图 | 框选区域 → 宿主滚一屏抓一张 → 重叠区对齐拼接 → 长图回到标注界面 |
 | 范围 | 整个桌面 / 只截 DSH 窗口 |
-| ☐ 截图时隐藏当前窗口 | QQ 同款开关；**只有宿主进程里生效**（见下） |
+| ☐ 截图时隐藏 DSH 界面 | 原生覆盖层在**冻结桌面之前**把 DSH 窗口藏起来（QQ 同款），框完/取消后还原并回到前台；默认关，在「更多设置」里勾 |
 | 🪟 抓窗方式 | 屏幕区域（快）/ 窗口自绘 PrintWindow（被挡住也拍得到） |
 
 标注工具：矩形 / 椭圆 / 箭头 / 画笔 / 文字 / 马赛克，八色 + 粗细滑杆，撤销重做（游标模型），
@@ -47,9 +47,26 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 ## 自检
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 88 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 415 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
+
+宿主半边 + 真窗口的回归（**必须在宿主进程里跑**，沙箱里注入不了消息）：
+
+```
+host_selfcheck({plugin:'dsh-screenshot'})                                        # 全量，68 项 / FAIL 必须 0
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-target-probe.mjs'})    # 6 项：投递滚轮投给谁
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})        # 10 项：真藏一次 + 还原 + 几何不变
+```
+
+`hide-self-probe` 会**真的把 DSH 窗口藏起来约 1.5 秒**（覆盖层正盖着屏幕，所以看不见），
+用来验"藏"与"还原"两半；它同时证明还原**不会改动窗口的摆放**（用 `SW_RESTORE` 会悄悄把
+最大化窗口变回普通大小）。
+
+改了 `ps/*.ps1` 要**重启 DSH**：抓屏助手在执行的那一刻就把脚本读完了，之后不会重读。
+（`host_selfcheck` 跑在另一个 node 进程里，它起的助手跟着自己消失，替代不了应用那个 ——
+`dev/refresh-shooter.mjs` 能给出"哪个助手是谁的"的证据。**覆盖层助手例外**：它盯着自己的
+`.ps1`，改完会自己退出重生。）
 
 浏览器里真点真画地验标注界面：
 
@@ -95,6 +112,14 @@ dsh plugin --profile desktop add <本目录或包名>
 ## 已知限制
 
 - **仅在本机 Windows + DSH `desktop` profile 实测**，其他平台/版本未验证。
+- 长截图的 auto 模式**优先投递滚轮**（不动光标），判定靠"下一张画面变没变"。投递要投给
+  **点位下面那个控件**：投给顶层窗口时 Chromium 认、**WinForms 等旧式应用不认**
+  （实测：顶层窗体只触发自己的 MouseWheel，内容不滚；投给 `WindowFromPoint` 的叶子才滚）。
+  不认时自动降级成移光标。Qt / Java / Electron 的自绘滚动容器**尚未逐个实测**。
+- **剪贴板是全机独占资源**：别的程序正占着时截图复制会失败（实测报「所请求的剪贴板操作失败」）。
+  助手会重试 4 次；仍失败时**客户端会明说"没复制成功"并留下诊断**，不会假装复制过。
+- 「截图时隐藏 DSH 界面」靠**标题**找窗口（`DeepSeek Harness` 子串匹配）；窗口标题被改得
+  面目全非时只会不藏（截图照常），不会报错。
 - 私有备份仓：按 `.gitignore` 排除了 `node_modules`、运行时缓存、调试 dump 与备份文件；要复现运行请自行 `npm install`（如有依赖）。
 - 文档中出现的 `$DSH_WORKSPACE`、`$TK_ROOT`、`%USERPROFILE%` 等是**占位符**，使用前需替换成本机实际路径。
 

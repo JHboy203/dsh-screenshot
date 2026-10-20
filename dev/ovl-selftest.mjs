@@ -28,12 +28,23 @@ import { startOverlayHost, overlayPick, overlayStatus, stopOverlayHost, OVERLAY_
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 let failures = 0
+let skipped = 0
 function check(name, cond, extra) {
 	const ok = cond === true
 	if (!ok) failures += 1
 	console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra === undefined ? '' : '  ' + JSON.stringify(extra)}`)
 	return ok
 }
+/**
+ * 剪贴板是**全机独占**资源：别的程序占着时 `Clipboard::SetImage` 必然失败（R30 实测过
+ * 一次持续几十秒的占用），那与本插件的正确性无关。这种情况下记 SKIP 而不是 FAIL ——
+ * 假红比不检查更糟。但**前提是助手带回了原因**（clipError）：没原因才是产品 bug。
+ */
+function skip(name, why) {
+	skipped += 1
+	console.log(`SKIP  ${name}  ${why}`)
+}
+const clipboardBusy = (res) => res !== null && res !== undefined && res.clip !== true && String(res.clipError ?? '').length > 0
 
 async function main() {
 	console.log('OVERLAY_DIR = ' + OVERLAY_DIR)
@@ -91,7 +102,8 @@ async function main() {
 	check('size 320x240', Number(res.w) === 320 && Number(res.h) === 240, { w: res.w, h: res.h })
 	check('origin 200,150', Number(res.x) === 200 && Number(res.y) === 150, { x: res.x, y: res.y })
 	check('seven shapes rendered', Number(res.shapes) === 7, { shapes: res.shapes })
-	check('clipboard took it', res.clip === true, { clip: res.clip })
+	if (clipboardBusy(res)) skip('clipboard took it', 'another program holds the clipboard: ' + res.clipError)
+	else check('clipboard took it', res.clip === true, { clip: res.clip, clipError: res.clipError })
 	check('labels reached the form', Number(res.labelsCount) === 9, { labelsCount: res.labelsCount })
 
 	if (fs.existsSync(png)) {
@@ -153,7 +165,24 @@ async function main() {
 	check('service.overlay 透传 regionOnly', svcRegion.ok === true && svcRegion.regionOnly === true, { ok: svcRegion.ok, regionOnly: svcRegion.regionOnly, reason: svcRegion.reason })
 	check('service.overlay 的 regionOnly 也不落盘', (svcRegion.png === '' || svcRegion.png === undefined) && !fs.existsSync(regionPng), { png: svcRegion.png })
 	const svcPick = await svc.overlay(20, JSON.stringify({ selfTest: true, png: path.join(OVERLAY_DIR, 'svc-pick.png') }))
-	check('service.overlay 不带 regionOnly 时仍是标注模式', svcPick.ok === true && svcPick.regionOnly === false && svcPick.clip === true, { ok: svcPick.ok, regionOnly: svcPick.regionOnly, clip: svcPick.clip })
+	check('service.overlay 不带 regionOnly 时仍是标注模式', svcPick.ok === true && svcPick.regionOnly === false, { ok: svcPick.ok, regionOnly: svcPick.regionOnly })
+	if (clipboardBusy(svcPick)) skip('service.overlay 也复制到剪贴板', 'clipboard busy: ' + svcPick.clipError)
+	else check('service.overlay 也复制到剪贴板', svcPick.clip === true, { clip: svcPick.clip })
+
+	// ── 闸门 2d：hideSelf 的透传（R30）────────────────────────────────
+	// 「截图时隐藏 DSH 界面」这个开关要跨三层：client → service.overlay → overlayPick →
+	// 助手的请求文件。少透任何一层，表现都是"勾了没反应"，而且**零报错**。
+	// 这里用**不存在的标题**验两件事：① 字段真的走到了助手；② 标题匹配不到不算失败 ——
+	// 截图必须照常成功（hidden:false），隐藏只是便利。
+	// 真把 DSH 藏起来的验收在 dev/hide-self-probe.mjs（宿主进程里跑，会短暂藏一下窗口）。
+	const svcHide = await svc.overlay(
+		20,
+		JSON.stringify({ selfTest: true, png: path.join(OVERLAY_DIR, 'svc-hide.png'), hideSelf: true, hideTitle: 'DSH-NO-SUCH-WINDOW-9f3a' })
+	)
+	check('service.overlay 透传 hideSelf（标题不存在也不失败）', svcHide.ok === true && svcHide.hidden === false, { ok: svcHide.ok, hidden: svcHide.hidden, reason: svcHide.reason })
+	// 没给标题 = 什么都不藏（协议里的默认语义；客户端总是带标题，但助手不能因此崩）。
+	const noTitle = await overlayPick({ timeoutSec: 20, selfTest: true, hideSelf: true })
+	check('hideSelf 没给标题时什么都不藏', noTitle.ok === true && noTitle.hidden === false, { ok: noTitle.ok, hidden: noTitle.hidden })
 
 	// ── 闸门 3：落盘兜底（首选目录写不进去时必须接住）────────────────
 	const fallback = path.join(OVERLAY_DIR, 'fallback-test.png')
@@ -177,7 +206,7 @@ async function main() {
 	check('helper stopped cleanly', overlayStatus().alive === false)
 
 	console.log('----')
-	console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`)
+	console.log(failures === 0 ? 'ALL PASS' + (skipped > 0 ? ` (${skipped} skipped: clipboard busy)` : '') : `${failures} FAILURE(S)`)
 	process.exit(failures === 0 ? 0 : 1)
 }
 
