@@ -48,10 +48,25 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 3. **含中文的 .ps1 必须带 UTF-8 BOM**：Windows PowerShell 5.1 对无 BOM 的 .ps1 按 GBK 解码，
    中文注释会被撕碎，甚至**吞掉后面的代码行**（症状是莫名其妙的 `LockBits`/参数类型错误）。
 
+## 宿主工具（8 个）
+
+| 工具 | 干什么 |
+|---|---|
+| `screenshot` / `screenshot_windows` | AI 自己抓图（不弹覆盖层、不抢前台、不动窗口），返回文件路径 |
+| `shot_health` | **换会话第一条命令**：按"文件时间 vs 进程/实例时间"回答**要不要重启** |
+| `shot_gate` | 一条命令跑完闸门（静态契约 / 覆盖层端到端 / 一拍成本 / 宿主全量） |
+| `shot_bridge` | 驱动**正在运行**的客户端（state / eval / click / menu / dome / longshot） |
+| `shot_displays` | 显示器 / DPI / 负坐标体检 + 越界裁剪实测 |
+| **`shot_pixels`** | **像素事实**（R34）：`rect` 现场抓或 `path` 读图 → 黑图判据（meanLuma/blackPct）、某颜色的像素数与**外接框**、与另一张图的**差异占比**（可限定 `region` 只看内部） |
+| **`shot_probe`** | **一条命令跑任意 dev 探针**（R34）：`hosttest` / `recframe` / `wheel-target` / `hide-self` / `wheel-app-qt` / `wheel-app-java`；超时**如实判成失败** |
+
+> 这两个是**换会话时的交接面**：验证这个插件最费劲的不是写代码，是"怎么证明屏幕上真的发生了
+> 什么"。前者把像素判据变成一次调用，后者把"必须在宿主里跑、各有各的参数"的门槛固化成一张表。
+
 ## 自检
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 431 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 446 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
@@ -69,6 +84,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 11 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',

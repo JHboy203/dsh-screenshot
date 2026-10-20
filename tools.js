@@ -16,10 +16,14 @@
  * 让 capture.ps1 在自己的进程里解析 —— Node 这边不是 DPI-aware，自己算会差 1.25 倍。
  */
 
-import { capture, displays, imageStats, listWindows, toDataUrl } from './lib/shot.mjs'
+import path from 'node:path'
+
+import { capture, displays, imageStats, listWindows, PLUGIN_ROOT, toDataUrl } from './lib/shot.mjs'
 import { queueDeliver } from './lib/bus.mjs'
 import { gateRun, bridgeStatus, bridgeSend, bridgeResults, WORKSPACE } from './lib/devtools.mjs'
 import { runHealth } from './lib/health.mjs'
+import { colorFacts, diffRatio, meanLuma, parseColor, readPng } from './lib/pixels.mjs'
+import { PROBES, runProbe } from './lib/probes.mjs'
 
 /** 把任意值收敛成 lossless JSON（宿主对工具输出会做往返校验，undefined 会让整次调用失败）。 */
 function lossless(value) {
@@ -545,6 +549,147 @@ export function buildShotTools(deps = {}) {
 					probes: lossless(probes),
 					error: '',
 					text: lines.join('\n'),
+				}
+			},
+		},
+		/**
+		 * 开发期：**像素事实**（"那块红框到底画在不在"这一类问题）。
+		 *
+		 * 为什么需要它：R32/R33 两次被同一类问题绊住 —— **几何断言看不见的那一半**：
+		 * 窗口 `Visible=true`、`-Info` 几何逐字段正确，屏幕上却一个像素都没有；或者"内部被盖住了"
+		 * 只有逐像素比对能回答。以前每次现写一段 PNG 解码（dev/png.mjs 就是这么来的）。
+		 *
+		 * 三种问法（可以组合）：
+		 *   rect + color  → 现场抓这块再找颜色，回答"画了没有、画在哪、有几个像素"
+		 *   path + color  → 对着已有 PNG 做同样的事
+		 *   against       → 两张图的差异占比（配 region 只看内部），回答"这块被改动了没有"
+		 * 另外永远附带 meanLuma / blackPct：**"拍出来是黑图"是这个插件最经典的静默失败**。
+		 */
+		{
+			name: 'shot_pixels',
+			description:
+				'像素探针（开发/验收用）：对**屏幕上一块矩形**或**一张已有 PNG** 给出可判定的像素事实 —— ' +
+				'meanLuma/blackPct（判"黑图"）、某个颜色的像素数与外接框（判"边框画了没有/画在哪"）、' +
+				'与另一张图的差异占比（可限定内部区域，判"这块有没有被盖住/改动"）。' +
+				'给 rect 时会现场抓一张（不抢前台、不动用户窗口）。',
+			parameters: {
+				type: 'object',
+				properties: {
+					rect: { type: 'string', description: '现场抓屏的矩形 "x,y,w,h"（屏幕物理像素）。与 path 二选一。' },
+					path: { type: 'string', description: '已有 PNG 的路径（绝对路径，或相对插件目录）。' },
+					color: { type: 'string', description: '要找的颜色："#eb4034" / "235,64,52"。给了才做颜色统计。' },
+					tol: { type: 'number', description: '颜色容差（默认 24，每通道）。' },
+					region: { type: 'string', description: '只看这块子区域 "x,y,w,h"（图内坐标）。差异比对与颜色统计都听它。' },
+					against: { type: 'string', description: '另一张 PNG 的路径：算出两张图在 region 内**不一致像素的占比**。' },
+					diffTol: { type: 'number', description: '差异比对的每通道容差（默认 10）。' },
+				},
+			},
+			output: { schema: { type: 'object', properties: RESULT_PROPERTIES }, render: TOOL_OUTPUT.render },
+			async execute(args) {
+				const raw = args !== null && typeof args === 'object' ? args : {}
+				const parseRectText = (text) => {
+					const [x, y, w, h] = String(text ?? '').split(',').map(Number)
+					if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null
+					return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) }
+				}
+				const region = parseRectText(raw.region)
+				let file = typeof raw.path === 'string' ? raw.path.trim() : ''
+				let captured = null
+				if (file === '' && typeof raw.rect === 'string' && raw.rect.trim() !== '') {
+					captured = await capFn({ mode: 'desktop', rect: raw.rect.trim(), noRestore: true, timeoutMs: 30_000 })
+					if (captured.ok === false) {
+						return { ok: false, error: String(captured.error || 'capture failed'), text: '抓屏失败：' + String(captured.error || '未知错误') }
+					}
+					file = String(captured.path || '')
+				}
+				if (file === '') {
+					return { ok: false, error: 'need rect or path', text: '要么给 rect（现场抓），要么给 path（已有图）。' }
+				}
+				const abs = file.startsWith('\\\\') || /^[a-zA-Z]:/.test(file) ? file : path.join(PLUGIN_ROOT, file)
+				let img
+				try {
+					img = readPng(abs)
+				} catch (error) {
+					return { ok: false, error: String(error?.message ?? error), text: '读不了这张图：' + String(error?.message ?? error) }
+				}
+				const lines = [`图 ${path.basename(abs)} · ${img.width}×${img.height}（${region === null ? '整图' : `${region.w}×${region.h}@${region.x},${region.y}`}）`]
+				const luma = meanLuma(img, region)
+				const stats = await statsFn(abs).catch(() => null)
+				const blackPct = stats === null ? 0 : Number(stats.blackPct) || 0
+				lines.push(`  亮度 meanLuma=${luma.toFixed(1)} · blackPct=${blackPct.toFixed(1)}` + (luma < 8 ? ' · **疑似黑图**' : ''))
+
+				const rgb = parseColor(raw.color)
+				const color = rgb === null ? null : colorFacts(img, rgb, { tol: Number(raw.tol), region })
+				if (color !== null) {
+					lines.push(
+						`  颜色 ${rgb.join(',')}：${color.count} 个像素` +
+							(color.bbox === null ? '（**没找到**）' : ` · 外接框 ${color.bbox.w}×${color.bbox.h} @ ${color.bbox.x},${color.bbox.y}`)
+					)
+				} else if (typeof raw.color === 'string' && raw.color.trim() !== '') {
+					lines.push(`  ⚠️ 颜色 "${raw.color}" 解析不了（用 #rrggbb 或 r,g,b）`)
+				}
+
+				let diff = null
+				if (typeof raw.against === 'string' && raw.against.trim() !== '') {
+					const other = raw.against.trim()
+					const absOther = other.startsWith('\\\\') || /^[a-zA-Z]:/.test(other) ? other : path.join(PLUGIN_ROOT, other)
+					try {
+						diff = diffRatio(img, readPng(absOther), { tol: Number(raw.diffTol), region: region === null ? undefined : region })
+						lines.push(`  与 ${path.basename(absOther)} 的差异：${(diff * 100).toFixed(1)}%${region === null ? '' : '（仅在 region 内）'}`)
+					} catch (error) {
+						lines.push('  ⚠️ 对照图读不了：' + String(error?.message ?? error))
+					}
+				}
+
+				return {
+					ok: true,
+					path: abs,
+					width: img.width,
+					height: img.height,
+					meanLuma: Math.round(luma * 10) / 10,
+					blackPct,
+					colorCount: color === null ? 0 : color.count,
+					colorBbox: color === null || color.bbox === null ? {} : lossless(color.bbox),
+					diff: diff === null ? -1 : Math.round(diff * 1000) / 1000,
+					range: captured === null ? '' : String(raw.rect || ''),
+					text: lines.join('\n'),
+				}
+			},
+		},
+		/**
+		 * 开发期：**一条命令跑任意 dev 探针**（含"必须在宿主里跑"这条门槛）。
+		 *
+		 * 换会话最贵的一步是重新摸清"验证怎么跑"：每个探针都有正确跑法（宿主上下文、
+		 * 自己的参数、超时要当失败）。这里固化成一张表。
+		 */
+		{
+			name: 'shot_probe',
+			description:
+				'跑 dsh-screenshot 的 dev 探针并给出 PASS/FAIL 汇总（"必须在宿主进程里跑"这条门槛天然满足）：' +
+				Object.keys(PROBES)
+					.map((k) => `${k}（${PROBES[k].about}）`)
+					.join('；') +
+				'。超时会被杀掉并**如实报成失败**（超时不算通过）。args 透传给探针脚本。',
+			parameters: {
+				type: 'object',
+				properties: {
+					probe: { type: 'string', description: '探针名：' + Object.keys(PROBES).join(' / ') },
+					args: { type: 'array', items: { type: 'string' }, description: '额外的命令行参数（如 ["-App","qt"]），一般不用。' },
+					timeoutSec: { type: 'number', description: '硬超时（秒）。默认取该探针自己的上限。' },
+				},
+				required: ['probe'],
+			},
+			output: { schema: { type: 'object', properties: RESULT_PROPERTIES }, render: TOOL_OUTPUT.render },
+			async execute(args) {
+				const raw = args !== null && typeof args === 'object' ? args : {}
+				const res = await runProbe({ probe: String(raw.probe ?? ''), args: raw.args, timeoutSec: Number(raw.timeoutSec) })
+				return {
+					ok: res.ok === true,
+					passed: res.passed,
+					failed: res.failed,
+					checks: lossless(res.failures),
+					error: res.ok ? '' : res.timedOut ? 'timeout' : `${res.failed} FAIL (exit ${res.exitCode})`,
+					text: res.text,
 				}
 			},
 		},
