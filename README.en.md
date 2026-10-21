@@ -193,7 +193,7 @@ then system audio `stereo mix / loopback`, else the first audio device — the r
 choice does **not** depend on the order the OS happens to list devices in) →
 `-i audio=<real device name>` + explicit `-map 0:v:0 -map 1:a:0` + `-c:a aac`.
 
-Three **invariants**, proven live by `dev/record-audio-probe.mjs` (26 assertions):
+Three **invariants**, proven live by `dev/record-audio-probe.mjs` (28 assertions):
 
 1. **A mic present must mean a real audio stream**: `hasAudio` in `record('stop')` comes from
    `ffprobe` via `rec.ps1 info`, not from "the user asked for sound";
@@ -221,6 +221,11 @@ both return `ok:false` with `region 只接受 "x,y,w,h" 字符串（收到 objec
 recording (a probe assertion proves nothing was started). Same principle as "a picked region that
 normalises to nothing must error" inside `recordStart`: **silently swapping a picked region for the
 full desktop records what the user never meant to share.**
+
+The same trap sat in **capture and OCR**: `cap()` / `ocr()` also read `typeof rect === 'string' ? rect : ''`.
+All three now share one judge (`coordTypeError` in `lib/service.mjs`) that rejects and names the
+parameter plus the type actually received — because on all three paths "silently replaced with empty"
+means the same thing: **treating the whole screen as the piece you asked for.**
 
 ## Recording result panel: why "extracting a frame" fails (R33)
 

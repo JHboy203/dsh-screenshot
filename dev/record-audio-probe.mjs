@@ -226,6 +226,12 @@ check(
 	directBad.ok === false && /字符串/.test(String(directBad.error)) && shot.isRecording() === false,
 	ascii({ ok: directBad.ok, err: directBad.error })
 )
+// The same judge guards `rect` (cap / ocr). Recording was the loud one; these two were quieter
+// (a silent "" means "the whole screen", so an OCR read or a capture silently widens).
+const badCap = await svc.cap('desktop', false, 'screen', 0, { x: 0, y: 0, w: 64, h: 64 })
+check('service.cap: object rect -> ok:false with a "字符串" error (no silent full-screen shot)', badCap.ok === false && /字符串/.test(String(badCap.error)), ascii({ ok: badCap.ok, err: badCap.error }))
+const badOcr = await svc.ocr('no-such-shot', [0, 0, 64, 64], 3, 'auto', 'none')
+check('service.ocr: array rect -> ok:false with a "字符串" error (before "shot not found")', badOcr.ok === false && /字符串/.test(String(badOcr.error)), ascii({ ok: badOcr.ok, err: badOcr.error }))
 
 /* cleanup: three temp clips, and the red frame must be gone ---------------------- */
 for (const f of files) {
