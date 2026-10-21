@@ -257,6 +257,59 @@ check(
 	envAgg.text.split('\n').slice(1, 3).join(' | ')
 )
 check('reasonOf 对通过的结果给 ok（否则聚合会把绿读成红）', reasonOf({ ok: true, passed: 3, failed: 0, exitCode: 0 }) === 'ok', reasonOf({ ok: true, passed: 3, failed: 0, exitCode: 0 }))
+/* ── R45：env 只重试一次，真红永不重试 ── */
+{
+	const one = [{ name: 'flaky', script: 'dev/flaky-probe.mjs', args: [], timeoutSec: 10, about: '环境抖动', heavy: false, auto: false, needs: '' }]
+	let calls = 0
+	const retried = await runProbes({
+		probes: 'all',
+		entries: one,
+		runner: async () => {
+			calls++
+			if (calls === 1) return { ok: false, passed: 1, failed: 1, exitCode: 2, timedOut: false, failures: ['covered'], reason: 'env', seconds: 5, tail: ['ENVIRONMENT: covered'], text: 'env' }
+			return { ok: true, passed: 6, failed: 0, exitCode: 0, timedOut: false, failures: [], reason: 'ok', seconds: 6, text: 'fine' }
+		},
+	})
+	check(
+		'聚合：env 自动重试一次，第二次通过就记 PASS（并如实标"重试后通过"）',
+		retried.ok === true && calls === 2 && retried.probes[0].attempts === 2 && /env 重试后通过/.test(retried.text),
+		`calls=${calls} · ok=${retried.ok} · ${String(retried.text).split('\n')[1] ?? ''}`
+	)
+	let calls2 = 0
+	const stillEnv = await runProbes({
+		probes: 'all',
+		entries: one,
+		runner: async () => {
+			calls2++
+			return { ok: false, passed: 1, failed: 1, exitCode: 2, timedOut: false, failures: ['covered'], reason: 'env', seconds: 5, tail: [], text: 'env' }
+		},
+	})
+	check(
+		'聚合：两次都 env 就**保持 env**（不骗成红，也不骗成绿），并说明重试过',
+		stillEnv.ok === false && calls2 === 2 && stillEnv.probes[0].reason === 'env' && /env 重试后仍 env/.test(stillEnv.text),
+		`calls=${calls2} · reason=${stillEnv.probes[0].reason}`
+	)
+	let calls3 = 0
+	const realRed = await runProbes({
+		probes: 'all',
+		entries: one,
+		runner: async () => {
+			calls3++
+			return { ok: false, passed: 1, failed: 4, exitCode: 1, timedOut: false, failures: ['真回归'], reason: 'failed', seconds: 5, tail: [], text: 'red' }
+		},
+	})
+	check('聚合：真红（exit 1）**不许重试** —— 重试会把回归藏起来', realRed.ok === false && calls3 === 1 && realRed.probes[0].reason === 'failed', `calls=${calls3} · reason=${realRed.probes[0].reason}`)
+	let calls4 = 0
+	await runProbes({
+		probes: ['flaky'],
+		entries: one,
+		runner: async () => {
+			calls4++
+			return { ok: false, passed: 1, failed: 1, exitCode: 2, timedOut: false, failures: [], reason: 'env', seconds: 5, tail: [], text: 'env' }
+		},
+	})
+	check('单跑（点名）不重试 —— operator 要看的是这一次的真实结果', calls4 === 1, `calls=${calls4}`)
+}
 const badName = await runProbes({ probes: ['good', '没有这个'], entries: FAKE, runner: fakeRunner })
 check('聚合：点名的探针不存在时明确报错（不静默跳过）', badName.ok === false && /未知探针/.test(String(badName.text)) && /没有这个/.test(String(badName.text)), String(badName.text).slice(0, 60))
 

@@ -92,6 +92,13 @@ That is why the host side uses PowerShell/.NET:
   `reason:"env"`, and the aggregate marks it `ENV` separately and gives handling wording. It counts neither as a pass nor as a product regression —
   lumping it into one red would send people looking in the wrong direction (measured this round: with QQ / DSH covering the fixture, all 4 items of `wheel-target` went red,
   all false reds).
+- **env is retried once inside `all` (R45)**: two consecutive `shot_probe({probe:'all'})` runs failed on
+  **different** probes (`wheel-target`, then `recframe`) while each passed 6/6 standalone — the probe
+  itself uses exit code 2 to say "environment blocked", which is not a regression. The aggregate now
+  waits 2.5 s and retries once, labelling the line `(env retried: passed)` / `(env retried: still env)`
+  and recording `probes[].attempts === 2`. **Real reds (exit 1 / any FAIL line) are never retried** and
+  **named single runs are never retried** — retrying real reds would hide regressions, and a single run
+  is exactly the one result the operator wants.
 
 ## Self-check
 
