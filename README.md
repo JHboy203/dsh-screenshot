@@ -57,7 +57,7 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 |---|---|
 | `screenshot` / `screenshot_windows` | AI 自己抓图（不弹覆盖层、不抢前台、不动窗口），返回文件路径 |
 | `shot_health` | **换会话第一条命令**：按"文件时间 vs 进程/实例时间"回答**要不要重启** |
-| `shot_gate` | 一条命令跑完闸门（静态契约 / 覆盖层端到端 / 一拍成本 / 宿主全量） |
+| `shot_gate` | 一条命令跑完闸门：默认「静态契约 + 覆盖层端到端」；**`full:true` = 交付前那一套**（再加一拍成本 + 探针聚合，约 2.5–5 分钟）；`host:true` 再加宿主全量（≈10 分钟，**不在 full 里**） |
 | `shot_bridge` | 驱动**正在运行**的客户端（state / eval / click / menu / dome / longshot） |
 | `shot_displays` | 显示器 / DPI / 负坐标体检 + 越界裁剪实测 |
 | **`shot_pixels`** | **像素事实**（R34）：`rect` 现场抓或 `path` 读图 → 黑图判据（meanLuma/blackPct）、某颜色的像素数与**外接框**、与另一张图的**差异占比**（可限定 `region` 只看内部） |
@@ -89,8 +89,19 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 
 ## 自检
 
+**交付前就一条命令（R37）**：
+
+```
+shot_gate({full:true})        # 静态契约 + 覆盖层端到端 + 一拍成本 + 探针聚合（≈2.5–5 分钟）
+shot_gate({full:true, host:true})   # 再加宿主全量（≈10 分钟）
+```
+
+改完宿主半边、**还没重启 DSH** 时（工具表是启动期读的），用同一个入口的宿主版：
+`host_selfcheck({plugin:'dsh-screenshot', script:'dev/gate-full-hostrun.mjs'})`
+（它先把实际计划打出来，再跑，判据与工具调用一致）。
+
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 465 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 471 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 

@@ -328,16 +328,19 @@ export function buildShotTools(deps = {}) {
 		{
 			name: 'shot_gate',
 			description:
-				'dsh-screenshot 的验证闸门：一次跑完（静态契约 / 覆盖层端到端 / 一拍成本 / 长截图内容级 / 宿主全量）并给结论表。' +
-				'默认跑前两项（秒级）；host=true 会跑完整宿主自检（约 3 分钟，会起测试窗口）。' +
+				'dsh-screenshot 的验证闸门：一次跑完（静态契约 / 覆盖层端到端 / 一拍成本 / 长截图内容级 / **探针聚合** / 宿主全量）并给结论表。' +
+				'默认跑前两项（秒级）；**`full:true` = 交付前的那一套**（这两项 + 一拍 + 探针聚合，约 5 分钟，一条命令代替"gate + probe all"两步）；' +
+				'`host:true` 再加完整宿主自检（约 10 分钟，会起测试窗口，**不在 full 里**）。' +
 				'覆盖层那一项自动把 DSH_OVERLAY_DIR 改道到 .tmp-shot-lab/gate-overlay，不会和正在运行的 DSH 抢请求目录。',
 			parameters: {
 				type: 'object',
 				properties: {
+					full: { type: 'boolean', description: '交付前的完整一套：静态契约 + 覆盖层 + 一拍成本 + 探针聚合（不含 hosttest）。默认 false。' },
 					smoke: { type: 'boolean', description: '跑静态契约（.tools/dsh-shot-smoke.mjs）。默认 true。' },
 					overlay: { type: 'boolean', description: '跑覆盖层+服务层端到端（dev/ovl-selftest.mjs，约 30s）。默认 true。' },
-					tick: { type: 'boolean', description: '量一拍成本（.tools/dsh-shot-tick-bench.mjs）。默认 false。' },
-					host: { type: 'boolean', description: '跑完整宿主自检（dev/hosttest.mjs，约 3 分钟，会起测试窗口）。默认 false。' },
+					tick: { type: 'boolean', description: '量一拍成本（.tools/dsh-shot-tick-bench.mjs）。默认 false（full 时自动开）。' },
+					probes: { type: 'boolean', description: '跑探针聚合（等同 shot_probe all，5 个轻探针约 3–5 分钟）。默认 false（full 时自动开）。' },
+					host: { type: 'boolean', description: '跑完整宿主自检（dev/hosttest.mjs，约 10 分钟，会起测试窗口）。默认 false。' },
 					content: { type: 'string', description: '长截图内容级验收的矩形 "x,y,w,h"（需要桌面上一块可滚动的参照窗，如 testbed_refwin）。' },
 				},
 			},
@@ -345,9 +348,11 @@ export function buildShotTools(deps = {}) {
 			async execute(args) {
 				const raw = args !== null && typeof args === 'object' ? args : {}
 				const res = await gateRun({
+					full: raw.full === true,
 					smoke: raw.smoke !== false,
 					overlay: raw.overlay !== false,
 					tick: raw.tick === true,
+					probes: raw.probes === true,
 					host: raw.host === true,
 					content: typeof raw.content === 'string' ? raw.content : '',
 				})

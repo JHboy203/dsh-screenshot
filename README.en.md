@@ -59,7 +59,7 @@ That is why the host side uses PowerShell/.NET:
 |---|---|
 | `screenshot` / `screenshot_windows` | The AI captures an image itself (no overlay, no stealing the foreground, no touching windows), returns the file path |
 | `shot_health` | **The first command in a new session**: answers **whether you need to restart**, based on "file time vs process/instance time" |
-| `shot_gate` | Runs the whole gate with one command (static contract / overlay end-to-end / one-shot cost / full host suite) |
+| `shot_gate` | Runs the whole gate with one command: default = static contract + overlay end-to-end; **`full:true` = the pre-delivery set** (adds one-shot cost + probe aggregate, ≈2.5–5 min); `host:true` adds the full host suite (≈10 min, **never inside `full`**) |
 | `shot_bridge` | Drives the **running** client (state / eval / click / menu / dome / longshot) |
 | `shot_displays` | Monitor / DPI / negative-coordinate health check + measured out-of-bounds cropping |
 | **`shot_pixels`** | **Pixel facts** (R34): capture on the spot with `rect` or read an image with `path` → black-image criteria (meanLuma/blackPct), the pixel count of a colour and its **bounding box**, and the **difference ratio** against another image (optionally restricted to the inside with `region`) |
@@ -93,8 +93,14 @@ That is why the host side uses PowerShell/.NET:
 
 ## Self-check
 
+**One command before delivery (R37)**: `shot_gate({full:true})` (static + overlay + one-shot cost +
+probe aggregate ≈2.5–5 min); add `host:true` for the full host suite (≈10 min).
+Before restarting DSH (the tool table is read at startup) use the same entry point from the host:
+`host_selfcheck({plugin:'dsh-screenshot', script:'dev/gate-full-hostrun.mjs'})` — it prints the
+resolved plan first, then runs the gate with exactly the same criteria.
+
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 465 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 471 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
