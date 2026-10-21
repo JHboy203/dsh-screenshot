@@ -152,6 +152,10 @@ shot_bridge({action:'send', ops:[{op:'eval', js:"(()=>{const o=document.createEl
 判据：`swept >= 1` 且 `gone: true`。smoke 里还有一条**假 DOM 真跑**的行为测试
 （上一代被清 / 本代保留 / 无标记不碰），所以这条逻辑不靠"字符串在不在"来保证。
 
+**版本号只有一个真源（R39）**：`const CLIENT_BUILD = 'Rxx'`，桥注册与 `__dshotDebug` 都引用它，
+`lib/health.mjs` 也优先读它。以前这个号在文件里有两处、`readClientBuild` 只读第一处 ——
+只改一处时磁盘与运行中**一起自洽地错**（实测：代码已是 R38，回执还报 R33）。
+
 ## 区域录屏（R32）
 
 **默认就让人框一块**，而不是整屏：整屏录到不该录的东西代价更高，而"框一块"以前藏在

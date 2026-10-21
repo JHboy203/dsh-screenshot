@@ -27,6 +27,15 @@ window.__ModuleLoader__.load({
 		const PKG = 'dsh-screenshot'
 		const SERVICE = 'shot'
 		const LS_KEY = 'dsh.screenshot.prefs'
+		/**
+		 * 客户端版本标记（**唯一真源**，R38）。
+		 *
+		 * 以前这个号在文件里出现两次（桥注册的 `build:` 与 `__dshotDebug.build`），而
+		 * `shot_health` 与回执都只看第一处 —— 只改一处时两边**一起自洽地错**，
+		 * "客户端是不是旧的"就永远判不出来（R38 实测：代码已是新的，回执还报 R33）。
+		 * 现在只有这一行，两处都引用它；`lib/health.mjs` 优先按 `CLIENT_BUILD = 'Rxx'` 读。
+		 */
+		const CLIENT_BUILD = 'R38'
 
 		/* ══════════════ 代次标记 + 跨热重载的 DOM 清理（R38）══════════════
 		 *
@@ -3341,7 +3350,7 @@ window.__ModuleLoader__.load({
 					target: target === undefined ? 'focused' : String(target),
 					instance: {
 						id: AI_BRIDGE.id,
-						build: 'R33',
+						build: CLIENT_BUILD,
 						born: AI_BRIDGE.born,
 						vw: window.innerWidth,
 						vh: window.innerHeight,
@@ -4246,7 +4255,7 @@ window.__ModuleLoader__.load({
 			//    所以给一个明确命名的钩子，而不是把内部状态散到 window 上。
 			window.__dshotDebug = {
 				/** 版本标记：AI 直连桥靠它判断"我改的这版到底加载了没有"（热重载有延迟）。 */
-				build: 'R38',
+				build: CLIENT_BUILD,
 				/** 本代次标记 + 加载时清掉了几个上一代次的节点（R38：跨热重载的 DOM 清理）。 */
 				gen: DSHOT_GEN,
 				swept: DSHOT_SWEPT,
