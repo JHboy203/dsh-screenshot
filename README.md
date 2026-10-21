@@ -135,6 +135,23 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-Title','记事本']})                                        # 任何已开着的应用
 ```
 
+## 客户端热重载留下的孤儿 DOM（R38）
+
+客户端半边被热重载时，**旧模块已经不在了** —— 它 `appendChild` 到 `body` 的节点
+（覆盖层根、调色板、录屏胶囊、面板、菜单、贴图）没人回收，攒几次就会"点不动 / 盖住"。
+以前唯一的解法是刷新页面。
+
+现在：每次加载生成一个**代次**，所有长期节点都经 `mountBody` 打上 `data-dshot-gen`，
+**加载即清扫别的代次**（只认这个属性，官方 DOM 一个都不碰）。
+`__dshotDebug` 里多了 `gen` / `swept` / `sweep()`，可以现场验：
+
+```
+shot_bridge({action:'send', ops:[{op:'eval', js:"(()=>{const o=document.createElement('div');o.id='dshot-stale-test';o.setAttribute('data-dshot-gen','g-old');document.body.appendChild(o);const n=window.__dshotDebug.sweep();return {swept:n,gone:document.getElementById('dshot-stale-test')===null,gen:window.__dshotDebug.gen}})()"}]})
+```
+
+判据：`swept >= 1` 且 `gone: true`。smoke 里还有一条**假 DOM 真跑**的行为测试
+（上一代被清 / 本代保留 / 无标记不碰），所以这条逻辑不靠"字符串在不在"来保证。
+
 ## 区域录屏（R32）
 
 **默认就让人框一块**，而不是整屏：整屏录到不该录的东西代价更高，而"框一块"以前藏在

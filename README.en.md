@@ -134,6 +134,19 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-Title','记事本']})                                        # 任何已开着的应用
 ```
 
+## Orphaned DOM after a client hot reload (R38)
+
+When the client half is hot-reloaded, **the old module is gone** — the nodes it appended to
+`body` (overlay root, colour palette, recording pill, panels, menus, pinned images) are never
+collected, and after a few reloads the page shows "clicks do nothing / something covers it".
+The only cure used to be refreshing the page.
+
+Now every load gets a **generation**; all long-lived nodes go through `mountBody` and carry
+`data-dshot-gen`, and a load **sweeps every other generation** (that attribute only — official
+DOM is never touched). `__dshotDebug` exposes `gen` / `swept` / `sweep()`, so it can be verified
+live through the bridge; smoke also runs a **fake-DOM behavioural test** (stale removed, current
+kept, untagged untouched), so the logic is not protected by substring checks alone.
+
 ## Region recording (R32)
 
 **By default the user is asked to select a region**, rather than recording the whole screen: recording something that should not be recorded costs more, and "select a region" used to be hidden

@@ -28,6 +28,50 @@ window.__ModuleLoader__.load({
 		const SERVICE = 'shot'
 		const LS_KEY = 'dsh.screenshot.prefs'
 
+		/* ══════════════ 代次标记 + 跨热重载的 DOM 清理（R38）══════════════
+		 *
+		 * 问题：客户端半边被热重载时，**旧模块已经不在**了 —— 谁也回收不了它 `appendChild`
+		 * 到 body 上的东西（覆盖层根、调色板、录屏胶囊、面板…）。于是每重载一次就多一份，
+		 * 攒到几次之后页面上出现"点不动/盖住/残留半个工具栏"，以前的结论是"只能刷新页面"。
+		 *
+		 * 做法：每次加载生成一个**代次**（DSHOT_GEN），本代次创建的节点都打上
+		 * `data-dshot-gen`；加载时先扫一遍，把**别的代次**留下的节点删掉。
+		 * 只碰带这个属性的节点 —— 官方 DOM 一律不碰，也不靠 class 猜。
+		 * 判据：`__dshotDebug.gen` 是当前代次；`__dshotDebug.sweep()` 返回清掉几个，
+		 * 可以用 `shot_bridge` 的 eval 现场验（造一个"上一代"的节点 → sweep → 看它没了）。 */
+		// >>> R38-DOMGEN（.tools/dsh-shot-smoke.mjs 按这对标记把这段抠出来，用假 DOM 真跑一遍）
+		const DSHOT_GEN = 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+		const GEN_ATTR = 'data-dshot-gen'
+
+		/** 把节点挂到 body 并打上本代次标记（**所有**长期存在的节点都走这里）。 */
+		function mountBody(node) {
+			if (node !== null && typeof node === 'object' && node.nodeType === 1) node.setAttribute(GEN_ATTR, DSHOT_GEN)
+			// 这里**故意**不走 mountBody（那就是它自己）；下面全局替换时靠 `host` 这个名字避开。
+			const host = document.body
+			host.appendChild(node)
+			return node
+		}
+
+		/** 清掉别的代次留下的节点，返回清掉的个数。只认 GEN_ATTR，不认 class。 */
+		function sweepStaleDom() {
+			const all = document.querySelectorAll('[' + GEN_ATTR + ']')
+			let n = 0
+			for (let i = 0; i < all.length; i++) {
+				const node = all[i]
+				if (node.getAttribute(GEN_ATTR) === DSHOT_GEN) continue
+				try {
+					node.remove()
+					n++
+				} catch {}
+			}
+			return n
+		}
+		// <<< R38-DOMGEN
+
+		// 加载即清理：上一次热重载的模块已经不在了，页面里只有我们这些人能回收它挂的节点。
+		const DSHOT_SWEPT = sweepStaleDom()
+
+
 		/* ══════════════ 诊断通道（AI 看不到 GUI，只能自己外送 DOM 事实）══════════════
 		 *
 		 * 背景：本机 AI 既读不到渲染进程控制台，也不能点应用里的按钮（沙箱是低完整性）。
@@ -510,12 +554,12 @@ window.__ModuleLoader__.load({
 
 			stage.append(canvas, badge, bar)
 			root.append(stage, hint)
-			doc.body.appendChild(root)
+			mountBody(root)
 
 			const textInput = doc.createElement('input')
 			textInput.className = 'dshot-textinput'
 			textInput.style.display = 'none'
-			doc.body.appendChild(textInput)
+			mountBody(textInput)
 
 			function toImage(ev) {
 				const r = canvas.getBoundingClientRect()
@@ -794,7 +838,7 @@ window.__ModuleLoader__.load({
 				})
 				row.append(picker, hex)
 				pal.appendChild(row)
-				doc.body.appendChild(pal)
+				mountBody(pal)
 				const r = anchorBtn.getBoundingClientRect()
 				const pw = pal.offsetWidth || 196
 				const ph = pal.offsetHeight || 120
@@ -1293,7 +1337,7 @@ window.__ModuleLoader__.load({
 				if (el === null) {
 					el = doc.createElement('div')
 					el.className = 'dshot-toast'
-					doc.body.appendChild(el)
+					mountBody(el)
 				}
 				el.textContent = msg
 				el.classList.add('is-on')
@@ -1322,7 +1366,7 @@ window.__ModuleLoader__.load({
 				if (panel === null) {
 					panel = doc.createElement('div')
 					panel.className = 'dshot-textpanel'
-					doc.body.appendChild(panel)
+					mountBody(panel)
 				}
 				panel.textContent = ''
 				const head = doc.createElement('div')
@@ -1687,7 +1731,7 @@ window.__ModuleLoader__.load({
 				if (shot.toast === null) {
 					const el = document.createElement('div')
 					el.className = 'dshot-toast'
-					document.body.appendChild(el)
+					mountBody(el)
 					shot.toast = el
 				}
 				// 闭包里抓住**这一个**元素再挂定时器。写成 `() => shot.toast.…` 的话，
@@ -1880,7 +1924,7 @@ window.__ModuleLoader__.load({
 				wrap.style.width = w + 'px'
 			}, { passive: false })
 
-			document.body.appendChild(wrap)
+			mountBody(wrap)
 			toast('已贴图（拖动移动 · Ctrl+滚轮缩放 · 鼠标移上去有动作条）')
 		}
 
@@ -1900,7 +1944,7 @@ window.__ModuleLoader__.load({
 				stop.addEventListener('click', () => void stopRecording())
 				pill.append(dot, label, stop)
 				pill._label = label
-				document.body.appendChild(pill)
+				mountBody(pill)
 			}
 			const tick = () => {
 				const s = Math.round((Date.now() - shot.recStart) / 1000)
@@ -2257,7 +2301,7 @@ window.__ModuleLoader__.load({
 			head.appendChild(close)
 
 			panel.append(head, stage, trimRow, foot, note)
-			document.body.appendChild(panel)
+			mountBody(panel)
 			panel.addEventListener('mousedown', (ev) => ev.stopPropagation())
 			panel.addEventListener('keydown', (ev) => ev.stopPropagation())
 			loadFrame(nowAt)
@@ -2782,7 +2826,7 @@ window.__ModuleLoader__.load({
 			const barEl = document.createElement('div')
 			barEl.className = 'dshot-longbar'
 			rootEl.append(frameEl, barEl)
-			document.body.appendChild(rootEl)
+			mountBody(rootEl)
 
 			/**
 			 * 框线只是**指示**「将要截哪块」。rect 是**屏幕物理像素**，而 DOM 用的是视口
@@ -3163,7 +3207,7 @@ window.__ModuleLoader__.load({
 				if (ev.target === rootEl) closePicker()
 			})
 			document.addEventListener('keydown', onKey, true)
-			document.body.appendChild(rootEl)
+			mountBody(rootEl)
 		}
 
 		/* ══════════════ AI 直连桥：让 AI 驱动这个真实客户端 ══════════════ */
@@ -3692,7 +3736,7 @@ window.__ModuleLoader__.load({
 			if (panel === null) {
 				panel = document.createElement('div')
 				panel.className = 'dshot-textpanel'
-				document.body.appendChild(panel)
+				mountBody(panel)
 			}
 			panel.textContent = ''
 			const head = document.createElement('div')
@@ -4010,7 +4054,7 @@ window.__ModuleLoader__.load({
 				const box = document.createElement('div')
 				box.className = 'dshot-menu dshot-more'
 				box.append(...settingsRows())
-				document.body.appendChild(box)
+				mountBody(box)
 				const r = moreRow.getBoundingClientRect()
 				const bw = box.offsetWidth || 220
 				const bh = box.offsetHeight || 240
@@ -4044,7 +4088,7 @@ window.__ModuleLoader__.load({
 			//   ② 定位整段包 try —— 任何意外都不该让菜单停在 hidden；
 			//   ③ 锚点退化时走 anchorRect 的回落，别再让菜单被 clamp 到窗口角落。
 			const r = anchorRect(anchorEl)
-			document.body.appendChild(menu)
+			mountBody(menu)
 			try {
 				const mw = menu.offsetWidth
 				const mh = menu.offsetHeight
@@ -4202,7 +4246,11 @@ window.__ModuleLoader__.load({
 			//    所以给一个明确命名的钩子，而不是把内部状态散到 window 上。
 			window.__dshotDebug = {
 				/** 版本标记：AI 直连桥靠它判断"我改的这版到底加载了没有"（热重载有延迟）。 */
-				build: 'R33',
+				build: 'R38',
+				/** 本代次标记 + 加载时清掉了几个上一代次的节点（R38：跨热重载的 DOM 清理）。 */
+				gen: DSHOT_GEN,
+				swept: DSHOT_SWEPT,
+				sweep: sweepStaleDom,
 				shot: shot,
 				prefs: prefs,
 				setPref: setPref,
