@@ -62,6 +62,8 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 | `shot_displays` | 显示器 / DPI / 负坐标体检 + 越界裁剪实测 |
 | **`shot_pixels`** | **像素事实**（R34）：`rect` 现场抓或 `path` 读图 → 黑图判据（meanLuma/blackPct）、某颜色的像素数与**外接框**、与另一张图的**差异占比**（可限定 `region` 只看内部） |
 | **`shot_probe`** | **一条命令跑任意 dev 探针**：`probe:"<名字>"` 单跑；`probe:"all"` **全跑聚合**（重活 `hosttest` 默认不跑、给了 `includeHeavy` 才跑且排最后）；`probe:"list"` 只列清单（不 spawn）。判据：超时 / **零检查**（退出码 0 但一行 PASS/FAIL 都没打印）/ 非零退出都**如实算失败**；**退出码 2 = env**（环境挡住，见下） |
+| **`shot_preflight`** | **改完宿主半边、重启前**用磁盘上的代码验一遍（R40）：默认「探针库自检 + full 闸门」；可点名 `probe-selftest` / `gate-full` / `all-probes` / `hosttest`。判据按**结论行**翻，**没有结论行 = 失败**；每项独立子进程（脚本会 `process.exit`，不能 import） |
+| **`shot_land`** | **收尾一步走**（R40）：自检 → `git add -A` → 提交（中文走 stdin）→ `push` → 回读 sha 确认。**默认 dryRun 只看计划**、自检红**不提交**、空标题拒绝。绕开"命令行 git 被沙箱拒 / 推送辅助漏推 / 中文编码"三个坑 |
 
 > 这两个是**换会话时的交接面**：验证这个插件最费劲的不是写代码，是"怎么证明屏幕上真的发生了
 > 什么"。前者把像素判据变成一次调用，后者把"必须在宿主里跑、各有各的参数"的门槛固化成一张表。
@@ -97,11 +99,14 @@ shot_gate({full:true, host:true})   # 再加宿主全量（≈10 分钟）
 ```
 
 改完宿主半边、**还没重启 DSH** 时（工具表是启动期读的），用同一个入口的宿主版：
-`host_selfcheck({plugin:'dsh-screenshot', script:'dev/gate-full-hostrun.mjs'})`
-（它先把实际计划打出来，再跑，判据与工具调用一致）。
+`shot_preflight({})`（R40）—— 默认「探针库自检 + full 闸门」，也可以点名
+`{what:'probe-selftest'}`（≈1.5 秒）/ `{what:'hosttest'}`（≈5–10 分钟）。
+
+**收尾一步走**：`shot_land({message:'Rxx: …'})` 先看计划（默认 `dryRun`），
+确认后 `{dryRun:false}` 才真的提交推送；自检红了它**不会**提交。
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 471 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 496 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 

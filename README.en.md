@@ -59,6 +59,8 @@ That is why the host side uses PowerShell/.NET:
 |---|---|
 | `screenshot` / `screenshot_windows` | The AI captures an image itself (no overlay, no stealing the foreground, no touching windows), returns the file path |
 | `shot_health` | **The first command in a new session**: answers **whether you need to restart**, based on "file time vs process/instance time" |
+| **`shot_preflight`** | **Verify the on-disk host half before restarting** (R40): default = probe-library selftest + full gate; name `probe-selftest` / `gate-full` / `all-probes` / `hosttest`. Verdicts come from the **conclusion line**; no conclusion line = failure. Every item runs in its own child process (those scripts call `process.exit`) |
+| **`shot_land`** | **Close the round in one call** (R40): selftests → `git add -A` → commit (message via stdin, so Chinese survives) → push → read the sha back. **dryRun by default**, refuses to commit on red selftests, rejects an empty title |
 | `shot_gate` | Runs the whole gate with one command: default = static contract + overlay end-to-end; **`full:true` = the pre-delivery set** (adds one-shot cost + probe aggregate, ≈2.5–5 min); `host:true` adds the full host suite (≈10 min, **never inside `full`**) |
 | `shot_bridge` | Drives the **running** client (state / eval / click / menu / dome / longshot) |
 | `shot_displays` | Monitor / DPI / negative-coordinate health check + measured out-of-bounds cropping |
@@ -95,12 +97,17 @@ That is why the host side uses PowerShell/.NET:
 
 **One command before delivery (R37)**: `shot_gate({full:true})` (static + overlay + one-shot cost +
 probe aggregate ≈2.5–5 min); add `host:true` for the full host suite (≈10 min).
-Before restarting DSH (the tool table is read at startup) use the same entry point from the host:
-`host_selfcheck({plugin:'dsh-screenshot', script:'dev/gate-full-hostrun.mjs'})` — it prints the
-resolved plan first, then runs the gate with exactly the same criteria.
+Before restarting DSH (the tool table is read at startup) run **`shot_preflight({})`** (R40): the
+default set is the probe-library selftest + the full gate, and you can name
+`probe-selftest` (≈1.5 s) / `gate-full` / `all-probes` / `hosttest`. Verdicts are parsed from the
+**conclusion line**, and **no conclusion line counts as a failure**; each item runs in its own
+child process because those scripts call `process.exit()`.
+
+**Closing the round**: `shot_land({message:'Rxx: …'})` shows a plan first (**dryRun by default**);
+`{dryRun:false}` really commits and pushes. It refuses to commit when the selftests are red.
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 471 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 496 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
