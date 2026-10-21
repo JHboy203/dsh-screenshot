@@ -109,7 +109,10 @@ if (!Number.isFinite(FX) || !Number.isFinite(FY)) {
 	}
 }
 console.log(`fixture spot ${FW}x${FH}@${FX},${FY}（${spotNote}）`)
-for (const f of [LOG, INFO, CONTROL]) {
+// ⚠️ CONSOLE 也要清：它是**追加**打开的（'a'），不清就会把**上一次甚至几天前**的 stderr 当成
+// 这一次的诊断尾巴。R35 实测踩到：夹具这次什么都没输出，尾巴里却是前一天 03:50 的解析错误，
+// 读起来像"文件语法坏了"。（同 R30 的"把历史 dump 当运行版本"。）
+for (const f of [LOG, INFO, CONTROL, CONSOLE]) {
 	try {
 		fs.rmSync(f, { force: true })
 	} catch {}
@@ -219,15 +222,38 @@ try {
 }
 child.unref()
 
+const t0 = Date.now()
+// 15s 是猜的；冷启动的 powershell.exe + Add-Type 编译在杀软扫描下可能远超它（R35 实测覆盖层
+// 助手 readyMs 就超过 10s）。放宽到 40s，并把**实测等了多久 / 子进程死没死**写进失败信息 ——
+// 否则只会得到一句 "did not come up"，看不出是慢还是挂。
 const up = await waitFor(() => {
 	try {
 		return fs.readFileSync(INFO, 'utf8').trim().startsWith('{')
 	} catch {
 		return false
 	}
-}, 15_000)
+}, 40_000)
 if (!up) {
-	console.log(JSON.stringify({ ok: false, error: 'fixture did not come up', shell: SHELL, dir: LAB }))
+	console.log(
+		JSON.stringify({
+			ok: false,
+			error: 'fixture did not come up',
+			shell: SHELL,
+			dir: LAB,
+			elapsedMs: Date.now() - t0,
+			fixturePid: child.pid,
+			fixtureExit: child.exitCode,
+			fixtureSignal: child.signalCode,
+			infoExists: fs.existsSync(INFO),
+			logSize: (() => {
+				try {
+					return fs.statSync(LOG).size
+				} catch {
+					return -1
+				}
+			})(),
+		})
+	)
 	try {
 		console.log(fs.readFileSync(CONSOLE, 'utf8').slice(-1500))
 	} catch {}

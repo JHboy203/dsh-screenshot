@@ -61,15 +61,29 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 | `shot_bridge` | 驱动**正在运行**的客户端（state / eval / click / menu / dome / longshot） |
 | `shot_displays` | 显示器 / DPI / 负坐标体检 + 越界裁剪实测 |
 | **`shot_pixels`** | **像素事实**（R34）：`rect` 现场抓或 `path` 读图 → 黑图判据（meanLuma/blackPct）、某颜色的像素数与**外接框**、与另一张图的**差异占比**（可限定 `region` 只看内部） |
-| **`shot_probe`** | **一条命令跑任意 dev 探针**（R34）：`hosttest` / `recframe` / `wheel-target` / `hide-self` / `wheel-app-qt` / `wheel-app-java`；超时**如实判成失败** |
+| **`shot_probe`** | **一条命令跑任意 dev 探针**：`probe:"<名字>"` 单跑；`probe:"all"` **全跑聚合**（重活 `hosttest` 默认不跑、给了 `includeHeavy` 才跑且排最后）；`probe:"list"` 只列清单（不 spawn）。判据：超时 / **零检查**（退出码 0 但一行 PASS/FAIL 都没打印）/ 非零退出都**如实算失败**；**退出码 2 = env**（环境挡住，见下） |
 
 > 这两个是**换会话时的交接面**：验证这个插件最费劲的不是写代码，是"怎么证明屏幕上真的发生了
 > 什么"。前者把像素判据变成一次调用，后者把"必须在宿主里跑、各有各的参数"的门槛固化成一张表。
 
+### 探针清单自动发现 + 全跑聚合（R35）
+
+- **自动发现**：`dev/*-probe.mjs` 会被自动收进清单（不用改 `lib/probes.mjs`）。
+  但它**默认不进 `all`** —— 实测 `dev/auto-wheel-probe.mjs` / `dev/postwheel-probe.mjs` 都**需要
+  命令行参数**，无参跑只会得到无意义结果。发现 ≠ 知道怎么跑，所以：`probe:"list"` 里有、点名能跑、
+  `includeAuto:true` 才进 `all`。已被显式表覆盖的脚本不会再登记（否则同一脚本会被跑两遍）。
+- **`all` 的默认集合** = 显式表里非重活的 5 个（`recframe` / `wheel-target` / `hide-self` /
+  `wheel-app-qt` / `wheel-app-java`），一轮 **约 3–5 分钟**（机器冷/忙时更久：夹具的 PowerShell
+  和覆盖层助手冷启动都可能 >20 s）。
+- **env 是第三态**：夹具被别的窗口盖住、窗口上不了屏 → 探针**退 2**，`shot_probe` 报
+  `reason:"env"`，聚合里单独标 `ENV` 并给出处置话术。它既不算通过，也不算产品回归 ——
+  混成一个红会把人往错的方向查（本轮实测：QQ / DSH 盖住夹具时 `wheel-target` 4 项全红，
+  全是假红）。
+
 ## 自检
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 446 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 462 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
@@ -77,9 +91,16 @@ node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里�
 
 ```
 host_selfcheck({plugin:'dsh-screenshot'})                                        # 全量，77 项 / FAIL 必须 0
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/all-probes-hostrun.mjs'})    # 真 runner 跑一遍聚合（改完 lib/probes.mjs、重启前用）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-target-probe.mjs'})    # 6 项：投递滚轮投给谁
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})        # 10 项：真藏一次 + 还原 + 几何不变
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})        # 11 项：真藏一次 + 还原 + 几何不变
 ```
+
+> ⚠️ **"猜出来的等待"是本项目探针最大的假红来源**（R35 一次收口三条）：
+> 覆盖层助手冷启动要 **~10 s**（实测 `readyMs:10205`）、录屏框的 canary 要等窗口自己写 Info、
+> 滚轮夹具要抢到前台才不被 DSH 盖住。三处都改成**等测得的就绪信号**（`overlayStatus().ready` /
+> `waitForFile(info)` / `AttachThreadInput` 后再 `SetForegroundWindow`），固定 sleep 一律不可靠。
+
 
 `hide-self-probe` 会**真的把 DSH 窗口藏起来约 1.5 秒**（覆盖层正盖着屏幕，所以看不见），
 用来验"藏"与"还原"两半；它同时证明还原**不会改动窗口的摆放**（用 `SW_RESTORE` 会悄悄把
@@ -87,7 +108,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 11 项：像素库/探针库自检（1 秒，确定性）
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 33 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
