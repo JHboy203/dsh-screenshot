@@ -62,6 +62,53 @@ function check(item, ok, detail) {
 }
 
 fs.mkdirSync(LAB, { recursive: true })
+
+/* ─────────────────── 挑一块没被占的桌面（R35） ───────────────────
+ * 夹具原来固定在 560,140（660x500）。但 DSH 自己的窗口也是 TopMost（Electron），而 Windows 的
+ * 前台锁让 SetForegroundWindow 从非前台进程调用**无效**（实测夹具日志 fg:false）——于是夹具被盖住，
+ * WindowFromPoint 在它自己的中心返回 Chrome_RenderWidgetHostHWND，所有滚轮断言都退化成"环境描述"。
+ * 不跟前台锁硬碰：直接选一块**没有任何窗口**的桌面区域放夹具（可用 -X/-Y 覆盖）。 */
+const FW = Number(arg('-W', '660')) || 660
+const FH = Number(arg('-H', '500')) || 500
+// ⚠️ 不能写 Number(arg('-X',''))：Number('') 是 0，而 0 是有限数 —— 于是"没给参数"会被当成
+// "指定在 0,0"（R35 实测踩到：夹具跑到左上角，挑位逻辑整段被跳过）。必须先判空串。
+const rawX = String(arg('-X', '')).trim()
+const rawY = String(arg('-Y', '')).trim()
+let FX = rawX === '' ? Number.NaN : Number(rawX)
+let FY = rawY === '' ? Number.NaN : Number(rawY)
+let spotNote = '由 -X/-Y 参数指定'
+if (!Number.isFinite(FX) || !Number.isFinite(FY)) {
+	const disp = await shot.displays().catch(() => null)
+	const vw = Number(disp?.virtual?.w ?? disp?.virtual?.width) || 1920
+	const vh = Number(disp?.virtual?.h ?? disp?.virtual?.height) || 1080
+	const list = await shot.listWindows({ limit: 200 }).catch(() => null)
+	const wins = ((list && list.windows) || [])
+		.map((w) => ({ x: Number(w.x), y: Number(w.y), w: Number(w.w ?? w.width), h: Number(w.h ?? w.height), hwnd: Number(w.hwnd) }))
+		.filter((w) => Number.isFinite(w.x) && Number.isFinite(w.y) && w.w >= 16 && w.h >= 16)
+	const hits = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+	let pick = null
+	for (let y = 8; pick === null && y + FH <= vh; y += 40) {
+		for (let x = 8; x + FW <= vw; x += 40) {
+			const r = { x, y, w: FW, h: FH }
+			if (!wins.some((w) => hits(r, w))) {
+				pick = r
+				break
+			}
+		}
+	}
+	if (pick === null) {
+		// 空位只是**优化**，不是判据：夹具自己会抢前台（AttachThreadInput），
+		// 真正的判据是下面的 PREFLIGHT。所以这里退回默认位置并说明，而不是直接判失败。
+		FX = 560
+		FY = 140
+		spotNote = `没找到空位（${wins.length} 个窗口占着整屏），退回默认 560,140 —— 依赖夹具自己抢前台`
+	} else {
+		FX = pick.x
+		FY = pick.y
+		spotNote = `${wins.length} 个窗口之外的空位`
+	}
+}
+console.log(`fixture spot ${FW}x${FH}@${FX},${FY}（${spotNote}）`)
 for (const f of [LOG, INFO, CONTROL]) {
 	try {
 		fs.rmSync(f, { force: true })
@@ -161,6 +208,7 @@ try {
 		[
 			'-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', FIXTURE,
 			'-Seconds', String(SECONDS), '-Log', LOG, '-Info', INFO, '-Control', CONTROL,
+			'-X', String(FX), '-Y', String(FY), '-W', String(FW), '-H', String(FH),
 		],
 		{ windowsHide: false, stdio: ['ignore', errFd, errFd] }
 	)
@@ -226,6 +274,32 @@ check('own helper is up (runs the current shotcore.ps1)', helperReady, JSON.stri
 
 /* ─────────────────── the arms ─────────────────── */
 
+/* 0. PREFLIGHT：真实滚轮能不能滚到夹具（原来是第 4 段"控制臂"，R35 提前并升级成前置闸）。
+ * 判据是探针自己早就写下的那句话："If this fails, the checks above would be meaningless."
+ * 实测（R35）：QQ 的前台窗盖住夹具中心 (880,390) 时，下面 4 条断言全红 —— 全是假红。
+ * 所以环境挡住就**退 2**（`lib/probes.mjs` 归成 reason='env'），一条产品判定都不打。 */
+const real = await arm('real-wheel', () => shot.wheelAt(info.cx, info.cy, -120, 1), 700)
+if (real.scrolled !== true) {
+	console.log(
+		`   FAIL  PREFLIGHT: a real wheel scrolls the fixture  wheels=${JSON.stringify(real.wheels)} line ${real.y0}->${real.y1} ret=${JSON.stringify(real.ret)}`
+	)
+	console.log('')
+	console.log('ENVIRONMENT: 夹具没有被真实滚轮滚到 —— 它的中心多半被别的窗口盖住（或窗口没能上屏）。')
+	console.log(`  target hwnd=${info.hwnd} centre=${info.cx},${info.cy} focus=${JSON.stringify(focus)}`)
+	console.log('  => 后面"投递没滚动 / 没投给叶子"的判定全部作废：这是环境，不是产品回归。')
+	console.log(`  处置：把 ${info.cx},${info.cy} 附近的窗口挪开（或等前台窗口不再挡着）再跑。`)
+	console.log('R29 wheel-target: 0 PASS / 1 FAIL(env)')
+	try {
+		fs.writeFileSync(CONTROL, 'q', 'ascii')
+	} catch {}
+	await sleep(400)
+	try {
+		child.kill()
+	} catch {}
+	process.exit(2)
+}
+check('PREFLIGHT: a real wheel scrolls the fixture (else nothing below counts)', true, `wheels=${JSON.stringify(real.wheels)} line ${real.y0}->${real.y1}`)
+
 // 1. The product path, helper fast path. THIS is the regression that matters.
 const viaHelper = await arm('postWheel/via-helper', () => shot.postWheel(info.hwnd, info.cx, info.cy, -120, 1))
 check(
@@ -269,14 +343,7 @@ if (foreign > 0) {
 	check('refuses a window that is not under the point (posts nothing)', false, 'no foreign window found to test with')
 }
 
-// 4. CONTROL: a real wheel. If this fails, the fixture cannot scroll by wheel at all and the
-// checks above would be meaningless.
-const real = await arm('real-wheel', () => shot.wheelAt(info.cx, info.cy, -120, 1), 700)
-check(
-	'CONTROL: a real wheel does scroll the fixture',
-	real.scrolled === true,
-	`wheels=${JSON.stringify(real.wheels)} line ${real.y0}->${real.y1} ret=${JSON.stringify(real.ret)}`
-)
+// 4. （原 CONTROL 臂已提前到第 0 段作为前置闸 —— 见上面 PREFLIGHT）
 
 // 5. Evidence (informational, not a verdict): what R27 used to do -- address the top-level form.
 const old = await arm('old/root-addressed', async () => (await rawPost(info.hwnd, info.cx, info.cy, -120, ['-Resolve', 'root'])).info)

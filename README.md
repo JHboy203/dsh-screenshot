@@ -1,5 +1,8 @@
 # dsh-screenshot · DSH 截图插件
 
+[English](README.en.md)
+
+
 QQ 同款截图，按钮挂在**对话输入框「语音」键旁边**（`conversation.input.left` 槽，order `-90`）。
 
 ## 能力

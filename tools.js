@@ -23,7 +23,7 @@ import { queueDeliver } from './lib/bus.mjs'
 import { gateRun, bridgeStatus, bridgeSend, bridgeResults, WORKSPACE } from './lib/devtools.mjs'
 import { runHealth } from './lib/health.mjs'
 import { colorFacts, diffRatio, meanLuma, parseColor, readPng } from './lib/pixels.mjs'
-import { PROBES, runProbe } from './lib/probes.mjs'
+import { listProbes, PROBES, runProbe, runProbes } from './lib/probes.mjs'
 
 /** 把任意值收敛成 lossless JSON（宿主对工具输出会做往返校验，undefined 会让整次调用失败）。 */
 function lossless(value) {
@@ -64,6 +64,15 @@ const RESULT_PROPERTIES = {
 	ms: { type: 'number' },
 	error: { type: 'string' },
 	text: { type: 'string' },
+	// R35：探针聚合（`shot_probe` 的 all / list 两种模式）
+	mode: { type: 'string' },
+	passed: { type: 'number' },
+	failed: { type: 'number' },
+	checks: { type: 'array' },
+	reason: { type: 'string' },
+	probes: { type: 'array' },
+	probeCount: { type: 'number' },
+	totalMs: { type: 'number' },
 }
 
 function num(v) {
@@ -96,6 +105,9 @@ export function buildShotTools(deps = {}) {
 	const dispFn = typeof deps.displays === 'function' ? deps.displays : displays
 	const statsFn = typeof deps.imageStats === 'function' ? deps.imageStats : imageStats
 	const healthFn = typeof deps.health === 'function' ? deps.health : runHealth
+	// R35：探针清单与单跑实现都能注入 —— 自检靠它验"聚合/发现"的逻辑而不真的 spawn。
+	const probeEntriesFn = typeof deps.probeEntries === 'function' ? deps.probeEntries : () => listProbes()
+	const probeRunner = typeof deps.probeRunner === 'function' ? deps.probeRunner : undefined
 
 	return [
 		/**
@@ -661,34 +673,97 @@ export function buildShotTools(deps = {}) {
 		 *
 		 * 换会话最贵的一步是重新摸清"验证怎么跑"：每个探针都有正确跑法（宿主上下文、
 		 * 自己的参数、超时要当失败）。这里固化成一张表。
+		 *
+		 * R35 补了两种模式：`probe:'list'`（清单 + 跑法 + 依赖，不 spawn）与
+		 * `probe:'all'`（全跑聚合，重活默认排除且排最后）。
 		 */
 		{
 			name: 'shot_probe',
 			description:
-				'跑 dsh-screenshot 的 dev 探针并给出 PASS/FAIL 汇总（"必须在宿主进程里跑"这条门槛天然满足）：' +
+				'跑 dsh-screenshot 的 dev 探针并给出 PASS/FAIL 汇总（"必须在宿主进程里跑"这条门槛天然满足）。三种问法：' +
+				'① `probe:"<名字>"` 单跑；② `probe:"all"` **全跑并聚合**（重活 hosttest 默认不跑、给 includeHeavy 才跑且排最后）；' +
+				'③ `probe:"list"` 只列清单与跑法（不 spawn）。显式探针：' +
 				Object.keys(PROBES)
 					.map((k) => `${k}（${PROBES[k].about}）`)
 					.join('；') +
-				'。超时会被杀掉并**如实报成失败**（超时不算通过）。args 透传给探针脚本。',
+				'；另外 `dev/*-probe.mjs` 会被**自动发现**（不用再改 lib/probes.mjs）。' +
+				'判据：超时、零检查（退出码 0 但一行 PASS/FAIL 都没打印）、非零退出都**如实算失败**。args 透传给探针脚本。',
 			parameters: {
 				type: 'object',
 				properties: {
-					probe: { type: 'string', description: '探针名：' + Object.keys(PROBES).join(' / ') },
+					probe: {
+						type: 'string',
+						description: '探针名 / "all"（全跑聚合）/ "list"（只列清单）：' + Object.keys(PROBES).join(' / ') + ' / all / list',
+					},
 					args: { type: 'array', items: { type: 'string' }, description: '额外的命令行参数（如 ["-App","qt"]），一般不用。' },
-					timeoutSec: { type: 'number', description: '硬超时（秒）。默认取该探针自己的上限。' },
+					timeoutSec: { type: 'number', description: '硬超时（秒）。默认取该探针自己的上限；聚合时对每个探针生效（会覆盖各自的上限）。' },
+					includeHeavy: { type: 'boolean', description: 'probe:"all" 时是否包含重活（hosttest ≈10 分钟）。默认 false。' },
+					includeAuto: { type: 'boolean', description: 'probe:"all" 时是否也跑自动发现的 dev/*-probe.mjs。**默认 false** —— 它们多半需要命令行参数（跑法见脚本头注释），无参跑只会有无意义结果。点名跑则不受此限。' },
+					stopOnFail: { type: 'boolean', description: 'probe:"all" 时第一个失败就停（省时间、但看不到后面）。默认 false = 全跑完。' },
 				},
 				required: ['probe'],
 			},
 			output: { schema: { type: 'object', properties: RESULT_PROPERTIES }, render: TOOL_OUTPUT.render },
 			async execute(args) {
 				const raw = args !== null && typeof args === 'object' ? args : {}
-				const res = await runProbe({ probe: String(raw.probe ?? ''), args: raw.args, timeoutSec: Number(raw.timeoutSec) })
+				const mode = String(raw.probe ?? '').trim()
+				const entries = probeEntriesFn()
+
+				// ① 只列清单：不 spawn，也不依赖任何窗口/屏幕。
+				if (mode === '' || mode === 'list') {
+					const lines = [`探针清单（${entries.length} 个；"自动" = dev/*-probe.mjs 里发现的，没写进显式表）`]
+					for (const e of entries) {
+						const tag = e.heavy === true ? ' [重活]' : e.auto === true ? ' [自动]' : ''
+						lines.push(`  ${e.name.padEnd(16)} ${String(e.timeoutSec).padStart(4)}s${tag}  ${e.about}${e.needs ? `（需要 ${e.needs}）` : ''}`)
+					}
+					lines.push('跑一个：probe:"<名字>"；全跑：probe:"all"（重活加 includeHeavy:true）。')
+					return {
+						ok: true,
+						mode: 'list',
+						probeCount: entries.length,
+						probes: lossless(entries.map((e) => ({ name: e.name, about: e.about, timeoutSec: e.timeoutSec, heavy: e.heavy === true, auto: e.auto === true, needs: e.needs, script: e.script }))),
+						text: lines.join('\n'),
+					}
+				}
+
+				// ② 全跑聚合。
+				if (mode === 'all') {
+					const agg = await runProbes({
+						probes: 'all',
+						includeHeavy: raw.includeHeavy === true,
+						includeAuto: raw.includeAuto === true,
+						stopOnFail: raw.stopOnFail === true,
+						timeoutSec: Number(raw.timeoutSec),
+						entries,
+						runner: probeRunner,
+					})
+					return {
+						ok: agg.ok === true,
+						mode: 'all',
+						passed: agg.passed,
+						failed: agg.failed,
+						totalMs: agg.totalMs,
+						probeCount: Array.isArray(agg.probes) ? agg.probes.length : 0,
+						checks: lossless((agg.probes ?? []).filter((p) => p.ok !== true).map((p) => ({ probe: p.probe, reason: p.reason, failures: p.failures }))),
+						probes: lossless((agg.probes ?? []).map((p) => ({ probe: p.probe, ok: p.ok, passed: p.passed, failed: p.failed, reason: p.reason, seconds: p.seconds, heavy: p.heavy, auto: p.auto, tail: p.ok === true ? [] : (p.tail ?? []).slice(-8) }))),
+						error: String(agg.error ?? ''),
+						text: agg.text,
+					}
+				}
+
+				// ③ 单跑（保持 R34 的输出形状，只多一个 reason）。
+				const direct = probeRunner === undefined ? null : probeRunner
+				const res =
+					direct === null
+						? await runProbe({ probe: mode, args: raw.args, timeoutSec: Number(raw.timeoutSec) })
+						: await direct({ probe: mode, args: Array.isArray(raw.args) ? raw.args.map(String) : [], timeoutSec: Number(raw.timeoutSec) })
 				return {
 					ok: res.ok === true,
 					passed: res.passed,
 					failed: res.failed,
+					reason: String(res.reason ?? ''),
 					checks: lossless(res.failures),
-					error: res.ok ? '' : res.timedOut ? 'timeout' : `${res.failed} FAIL (exit ${res.exitCode})`,
+					error: res.ok ? '' : res.reason === 'env' ? 'env（环境挡住，不是产品回归）' : res.reason === 'zero-checks' ? 'zero-checks' : `${res.failed} FAIL (exit ${res.exitCode})`,
 					text: res.text,
 				}
 			},

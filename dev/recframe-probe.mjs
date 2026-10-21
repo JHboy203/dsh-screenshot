@@ -37,8 +37,11 @@ const shot = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'shot.mjs')).hr
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const results = []
-function check(item, ok, detail) {
-	results.push({ item, ok: ok === true })
+/** env（环境挡住）的失败项：既不算通过，也不该被当成本产品回归（退出码 2，见文件末尾）。 */
+let envFails = 0
+function check(item, ok, detail, kind) {
+	results.push({ item, ok: ok === true, env: kind === 'env' })
+	if (kind === 'env' && ok !== true) envFails += 1
 	console.log(`   ${ok ? 'PASS' : 'FAIL'}  ${item}  ${detail}`)
 }
 
@@ -47,18 +50,20 @@ fs.mkdirSync(LAB, { recursive: true })
 /* ─────────────────── where to put it ─────────────────── */
 
 /**
- * A desktop spot the frame can own. It is intentionally in the lower-right corner: that area is
- * wallpaper on every layout we have seen, so the "interior did not change" comparison is not
- * fighting a playing video. It does NOT need to be uncovered -- the frame is topmost, and the
- * interior comparison tolerates nothing moving, which is why a static patch is chosen.
+ * 取景框必须落在**一块自己不会变的桌面**上。R32 时写死了右下角（"那个位置在任何布局下都是壁纸"）——
+ * R35 实测这个假设会失效：QQ 的窗口 1239×930@559,71 把右下角盖住了，它一动画，
+ * "内部仍显示桌面"就从 100.0% 掉到 **71.9%**，看起来像框在改画面，其实是背景在动。
+ * 所以改成**实测挑点**（见 pickRegion）：候选位置各拍两帧，选第一块"两帧完全一致"的。
+ * 一块都找不到 → 退 2（环境：屏幕上没有静态区域），一条像素判定都不打。
  */
 const disp = await shot.displays()
 const vw = Number(disp.virtual?.w) || 1920
 const vh = Number(disp.virtual?.h) || 1080
-const REGION = { x: vw - 240, y: vh - 320, w: 160, h: 110 }
 const PAD = 8
-const CROP = { x: REGION.x - PAD, y: REGION.y - PAD, w: REGION.w + 2 * PAD, h: REGION.h + 2 * PAD }
-console.log(`screen ${vw}x${vh} · region ${REGION.w}x${REGION.h}@${REGION.x},${REGION.y} · dpi mixed=${disp.mixedDpi} negativeOrigin=${disp.negativeOrigin}`)
+/** @type {{x:number,y:number,w:number,h:number}} */
+let REGION = null
+/** @type {{x:number,y:number,w:number,h:number}} */
+let CROP = null
 
 /* ─────────────────── helpers ─────────────────── */
 
@@ -172,6 +177,67 @@ async function waitForFile(file, ms) {
 	return false
 }
 
+/* ─────────────────── 挑一块真正静态的取景位置 ─────────────────── */
+/** 两张同尺寸图里"逐像素一致"的比例（容差 6，和 interiorDiff 同口径）。 */
+function sameFraction(a, b) {
+	let same = 0
+	let total = 0
+	const w = Math.min(a.width, b.width)
+	const h = Math.min(a.height, b.height)
+	for (let y = 0; y < h; y++) {
+		for (let x = 0; x < w; x++) {
+			const p = a.at(x, y)
+			const q = b.at(x, y)
+			total++
+			if (Math.abs(p[0] - q[0]) <= 6 && Math.abs(p[1] - q[1]) <= 6 && Math.abs(p[2] - q[2]) <= 6) same++
+		}
+	}
+	return total === 0 ? 0 : same / total
+}
+
+async function pickRegion() {
+	const RW = 160
+	const RH = 110
+	const cands = [
+		{ x: vw - 240, y: vh - 320, why: '右下角（R32 的默认位置）' },
+		{ x: vw - 240, y: 60, why: '右上角' },
+		{ x: Math.round(vw / 2 - RW / 2), y: 40, why: '顶部中间' },
+		{ x: 40, y: vh - 320, why: '左下角' },
+		{ x: 320, y: Math.round(vh / 2 - RH / 2), why: '左中' },
+	]
+	for (const c of cands) {
+		const region = { x: c.x, y: c.y, w: RW, h: RH }
+		const crop = { x: region.x - PAD, y: region.y - PAD, w: RW + 2 * PAD, h: RH + 2 * PAD }
+		let a
+		let b
+		try {
+			a = await capture('pick-a', crop)
+			await sleep(350)
+			b = await capture('pick-b', crop)
+		} catch {
+			continue
+		}
+		const ratio = sameFraction(a.img, b.img)
+		console.log(`candidate ${c.x},${c.y}（${c.why}）静态度 ${(ratio * 100).toFixed(1)}%`)
+		if (ratio >= 0.995) return { region, crop, why: c.why, ratio }
+	}
+	return null
+}
+
+const picked = await pickRegion()
+if (picked === null) {
+	console.log('')
+	console.log('ENVIRONMENT: 屏幕上找不到一块 350ms 内不变化的区域（5 个候选全在动）。')
+	console.log('  => "内部仍显示桌面"这条判据无法成立；像素判定全部作废 —— 这不是框的问题。')
+	console.log('1 PASS / 1 FAIL(env)')
+	process.exit(2)
+}
+REGION = picked.region
+CROP = { ...picked.crop }
+console.log(
+	`screen ${vw}x${vh} · region ${REGION.w}x${REGION.h}@${REGION.x},${REGION.y}（${picked.why}，静态度 ${(picked.ratio * 100).toFixed(1)}%）· dpi mixed=${disp.mixedDpi} negativeOrigin=${disp.negativeOrigin}`
+)
+
 /* ─────────────────── arm 0: CANARY ───────────────────
  * "A window started this way can be seen at all." Without this arm, an invisible frame is
  * indistinguishable from an environment that never showed the window (both produce zero border
@@ -193,13 +259,12 @@ try {
 	fs.closeSync(canaryLog)
 } catch {}
 canary.unref()
-let canaryUp = false
-for (let i = 0; i < 60 && !canaryUp; i++) {
-	await sleep(100)
-	try {
-		canaryUp = fs.readFileSync(canaryInfo, 'utf8').trim().startsWith('{')
-	} catch {}
-}
+/* WAIT FOR THE WINDOW, DO NOT SLEEP —— 和 arm 1 同一条纪律。冷启动的 powershell.exe + Add-Type
+ * 编译要 1.5–2.5s，机器忙时更久。R35 实测：把取景框改成"多点两次抓屏"（pickRegion）之后，
+ * 原来固定的 6s 轮询不够了 —— canary.json 在轮询结束后才写出，抓到的是一张**只画了一半**的窗口
+ * （118/240 px、up=false），于是 CANARY 报"窗口没上屏"，而其实只是"还没画完"。
+ * 判据必须来自窗口自己的 Info 文件，而不是一个猜出来的 sleep。 */
+const canaryUp = await waitForFile(canaryInfo, 20_000)
 await sleep(400)
 const canaryShot = await capture('canary', CANARY_CROP)
 const lime = countIn(canaryShot.img, 0, 0, canaryShot.img.width, canaryShot.img.height, (c) => c[1] > 180 && c[0] < 120 && c[2] < 120)
@@ -284,13 +349,23 @@ const keyPx = countIn(img, PAD, PAD, PAD + REGION.w, PAD + REGION.h, (c) => near
 check('interior is NOT blacked out', interiorLuma > 15, `luma=${interiorLuma.toFixed(1)} (>15)`)
 check('interior is NOT key-coloured (no TransparencyKey leak)', keyPx <= 2, `magenta px=${keyPx} (<=2)`)
 
-/* the strongest statement: the interior still shows what was there before the frame appeared */
-const diff = interiorDiff(before.img, img)
-check(
-	'interior still shows the desktop (>=95% pixels unchanged)',
-	diff.same / diff.total >= 0.95,
-	`${((diff.same / diff.total) * 100).toFixed(1)}% unchanged of ${diff.total}`
-)
+/* the strongest statement: the interior still shows what was there before the frame appeared.
+ * ⚠️ R35：这条**判决必须放到关框之后** —— 判"环境还是产品"要多一条对照臂：
+ * 桌面自己在同一段时间里变了没有（见 arm 2 之后的 POST 段）。 */
+let diff = interiorDiff(before.img, img)
+let retried = false
+if (diff.same / diff.total < 0.95) {
+	await sleep(600)
+	try {
+		const again = await capture('interior-retry')
+		const d2 = interiorDiff(before.img, again.img)
+		if (d2.same / d2.total > diff.same / diff.total) {
+			diff = d2
+			retried = true
+		}
+	} catch {}
+}
+const interiorRatio = diff.same / diff.total
 
 /* ─────────────────── arm 2: the stop file ─────────────────── */
 
@@ -302,6 +377,37 @@ if (!stopped) {
 		frameChild.kill()
 	} catch {}
 	await sleep(500)
+}
+
+/* ─────────────────── POST：关框后再拍一张（对照臂） ───────────────────
+ * R35 实测：取景位置在右下角，而 QQ 的窗口 1239×930@559,71 正好盖住它；QQ 一动，
+ * "内部仍显示桌面"就从 100.0% 掉到 71.9% —— 看起来像框画进了画面，其实是背景在动。
+ * 判别方法：**桌面自己**在这段时间里变了没有。
+ *   内部变了 + 桌面也变了 → env（环境，不是产品回归）
+ *   内部变了 + 桌面没变   → failed（真回归：框在改画面）
+ */
+await sleep(700)
+let afterImg = null
+try {
+	afterImg = (await capture('after')).img
+} catch {}
+const deskRatio = afterImg === null ? 1 : sameFraction(before.img, afterImg)
+const interiorOk = interiorRatio >= 0.95
+const deskMoved = deskRatio < 0.95
+check(
+	'interior still shows the desktop (>=95% pixels unchanged)',
+	interiorOk,
+	`${(interiorRatio * 100).toFixed(1)}% unchanged of ${diff.total}${retried ? '（重采一次后）' : ''}` +
+		(interiorOk ? '' : `；对照臂：桌面自身静态度 ${(deskRatio * 100).toFixed(1)}%`),
+	interiorOk || !deskMoved ? 'product' : 'env'
+)
+if (!interiorOk && deskMoved) {
+	console.log('')
+	console.log(
+		`ENVIRONMENT: 内部只 ${(interiorRatio * 100).toFixed(1)}% 未变，但**桌面自己在同一段时间也只 ${(deskRatio * 100).toFixed(1)}% 未变**。`
+	)
+	console.log('  => 是取景框下面的窗口在动（R35 实测：QQ 的 1239x930@559,71 盖住右下角那块），不是框画进了画面。')
+	console.log('  => 这条记 env：不算产品回归，也不算通过；其余像素判定照旧有效。')
 }
 
 /* ─────────────────── arm 3: kill (the path recordStop uses) ─────────────────── */
@@ -322,8 +428,13 @@ check('killing the process closes the frame', up2 && killed, `up=${up2} exit=${f
 /* ─────────────────── report ─────────────────── */
 
 const fails = results.filter((r) => !r.ok).length
+const productFails = results.filter((r) => !r.ok && r.env !== true).length
 console.log(`\n${results.length - fails} PASS / ${fails} FAIL  (lab: ${LAB})`)
-if (fails > 0) process.exit(1)
+if (productFails > 0) process.exit(1)
+if (envFails > 0) {
+	console.log(`其中 ${envFails} 项是 env（环境挡住，见上面的 ENVIRONMENT 段）—— 不算产品回归，也不算通过。`)
+	process.exit(2)
+}
 
 function meanLuma(image, x0 = 0, y0 = 0, x1 = image.width, y1 = image.height) {
 	let sum = 0

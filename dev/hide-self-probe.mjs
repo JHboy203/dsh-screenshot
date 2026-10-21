@@ -30,7 +30,7 @@ process.env.DSH_OVERLAY_DIR = path.join(LAB, 'overlay')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const shot = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'shot.mjs')).href)
-const { overlayPick, overlayStatus, stopOverlayHost } = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'overlay.mjs')).href)
+const { overlayPick, overlayStatus, startOverlayHost, stopOverlayHost } = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'overlay.mjs')).href)
 const { createShotService } = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'service.mjs')).href)
 
 class FakeRemote {
@@ -59,6 +59,18 @@ check('DSH window is visible before the test', before !== null, before === null 
 
 const PNG = path.join(LAB, 'freeze.png')
 const FSHOT = path.join(LAB, 'form')
+
+/* 预热助手（R35）。原来的第一枪直接吃 20s 超时，而冷启动的 powershell.exe + Add-Type 编译
+ * 一旦慢到 20s 外，就会得到 `{"ok":false,"reason":"not-ready"}` —— 后面两枪反而都过，
+ * 于是三条断言一起变红，看着像"hideSelf 坏了"，其实只是**助手还没起来**。
+ * 判据必须是"助手 ready"，不能是一段猜出来的等待：先显式启一次并等 ready。 */
+startOverlayHost()
+let ready = false
+for (let i = 0; i < 200 && !ready; i++) {
+	await sleep(150)
+	ready = overlayStatus().ready === true
+}
+check('overlay helper is ready before the first arm', ready, { status: overlayStatus() })
 
 // 1. The real thing: hide DSH, freeze, put it back. selfTest drives the whole annotate path, so
 // no mouse is needed and the overlay closes on its own.

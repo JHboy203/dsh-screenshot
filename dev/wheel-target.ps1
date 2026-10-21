@@ -56,6 +56,12 @@ public class DshWheelTarget {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool on);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 }
 "@
 $script:dpiMode = 'none'
@@ -153,10 +159,28 @@ $form.add_Shown({
     Log $payload
     # Focus the scroll area. A TextBox can take focus; if it does not, every later "did not
     # scroll" is unattributable, so the state is logged instead of assumed.
+    # R35: TopMost + Activate is NOT enough when the DSH GUI (Electron, itself topmost) is the
+    # ACTIVE window -- measured: WindowFromPoint at our own centre returned
+    # Chrome_RenderWidgetHostHWND, i.e. the probe's point landed on DSH and every wheel assertion
+    # became an environment statement. SetForegroundWindow alone is refused by the foreground lock
+    # (measured fg=false), so attach to the foreground thread first -- the standard workaround.
     try {
-      $form.Activate()
+      $fg = [DshWheelTarget]::GetForegroundWindow()
+      $tid = [DshWheelTarget]::GetWindowThreadProcessId($fg, [IntPtr]::Zero)
+      $my = [DshWheelTarget]::GetCurrentThreadId()
+      $attached = $false
+      if ($tid -ne 0 -and $tid -ne $my) { $attached = [DshWheelTarget]::AttachThreadInput($tid, $my, $true) }
+      try {
+        [void][DshWheelTarget]::BringWindowToTop($form.Handle)
+        [void][DshWheelTarget]::SetForegroundWindow($form.Handle)
+        $form.Activate()
+      } finally {
+        if ($attached) { [void][DshWheelTarget]::AttachThreadInput($tid, $my, $false) }
+      }
+    } catch { Log @{ ok = $false; ev = 'raise'; error = "$_" } }
+    try {
       [void]$editor.Focus()
-      Log @{ ok = $true; ev = 'focus'; editor = [bool]$editor.Focused; form = [bool]$form.Focused; line = (FirstVisibleLine) }
+      Log @{ ok = $true; ev = 'focus'; editor = [bool]$editor.Focused; form = [bool]$form.Focused; line = (FirstVisibleLine); fg = ([int][DshWheelTarget]::GetForegroundWindow() -eq [int]$form.Handle) }
     } catch { Log @{ ok = $false; ev = 'focus'; error = "$_" } }
     $script:lastLine = FirstVisibleLine
   } catch { Log @{ ok = $false; ev = 'shown'; error = "$_" } }
