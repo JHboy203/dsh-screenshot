@@ -1,3 +1,6 @@
+# 临时复现脚本（`dev/_xxx.mjs` 用完即弃；沙箱里删不掉时至少别入库）
+dev/_*
+
 # 运行时产物（不入库）
 node_modules/
 .cache/

@@ -241,6 +241,47 @@ check('service.cap: object rect -> ok:false with a "字符串" error (no silent 
 const badOcr = await svc.ocr('no-such-shot', [0, 0, 64, 64], 3, 'auto', 'none')
 check('service.ocr: array rect -> ok:false with a "字符串" error (before "shot not found")', badOcr.ok === false && /字符串/.test(String(badOcr.error)), ascii({ ok: badOcr.ok, err: badOcr.error }))
 
+/* 9. concurrent start must SERIALIZE (R47) --------------------------------------
+ * Why this arm exists: `recordStart` used to check "already recording" FIRST, then await
+ * device enumeration and a 600 ms liveness sleep before assigning `recording`. Two starts
+ * inside that window both passed the check and each spawned ffmpeg; the loser's child was
+ * never recorded anywhere, so `recordStop` could not stop it -- it kept gdigrab-ing forever
+ * (measured before the fix: two mp4 files, 2823 B stopped, 48 B still growing).
+ *
+ * The contract after the fix: the second call WAITS for the first, then answers
+ * `already:true` with the same path -- and exactly ONE new file appears in the scratch dir.
+ * (Merging both calls into one would silently swallow the second caller's fps/region/audio,
+ * which is the other thing this project forbids.)
+ */
+const countMp4 = () => {
+	try {
+		return fs.readdirSync(path.join(LAB, 'rec')).filter((n) => n.endsWith('.mp4')).length
+	} catch {
+		return 0
+	}
+}
+const beforeRace = countMp4()
+const [raceA, raceB] = await Promise.all([
+	shot.recordStart({ fps: 10, region: REGION, audio: false }),
+	shot.recordStart({ fps: 10, region: REGION, audio: false }),
+])
+if (raceA.path) files.push(raceA.path)
+if (raceB.path && raceB.path !== raceA.path) files.push(raceB.path)
+check(
+	'concurrent start: second call gets already:true and the SAME path',
+	raceA.ok === true && raceB.ok === true && raceB.already === true && raceB.path === raceA.path && raceA.path !== '',
+	ascii({ a: { ok: raceA.ok, already: raceA.already === true }, b: { ok: raceB.ok, already: raceB.already === true, same: raceB.path === raceA.path } })
+)
+await sleep(1200)
+const raceStop = await shot.recordStop()
+await sleep(400)
+const afterRace = countMp4()
+check(
+	'concurrent start: exactly ONE new mp4 (no orphan recorder left writing)',
+	afterRace - beforeRace === 1 && raceStop.ok === true && raceStop.bytes > 0 && shot.isRecording() === false,
+	ascii({ added: afterRace - beforeRace, stopOk: raceStop.ok, bytes: raceStop.bytes })
+)
+
 /* cleanup: three temp clips, and the red frame must be gone ---------------------- */
 for (const f of files) {
 	try {
