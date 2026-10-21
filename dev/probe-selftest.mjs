@@ -93,7 +93,17 @@ const want = (0.299 * 235 + 0.587 * 64 + 0.114 * 52 + 0.114 * 255) / 2
 check('meanLuma 与手算一致（±0.5）', Math.abs(luma - want) < 0.5, `${luma.toFixed(2)} vs ${want.toFixed(2)}`)
 
 /* ─────────────────── lib/probes.mjs ─────────────────── */
-check('探针表里有 6 个（hosttest / recframe / wheel-target / hide-self / wheel-app-qt / wheel-app-java）', Object.keys(PROBES).length === 6, Object.keys(PROBES).join(','))
+// 显式探针表是**契约**：增删条目都要在这里改一行，别让"少了一个探针"静默通过。
+// R41 加 record-audio（录屏录音）。断言比"数量相等"更强一点：名字集合逐项对上。
+const wantProbes = ['hosttest', 'recframe', 'record-audio', 'wheel-target', 'hide-self', 'wheel-app-qt', 'wheel-app-java']
+const gotProbes = Object.keys(PROBES)
+const missingProbes = wantProbes.filter((n) => !gotProbes.includes(n))
+const extraProbes = gotProbes.filter((n) => !wantProbes.includes(n))
+check(
+	'探针表里有 7 个（hosttest / recframe / record-audio / wheel-target / hide-self / wheel-app-qt / wheel-app-java）',
+	missingProbes.length === 0 && extraProbes.length === 0,
+	gotProbes.join(','),
+)
 const parsed = countChecks('PASS  甲\nFAIL  乙\n  PASS  丙\n随便一行\n')
 check('countChecks 只认行首 PASS/FAIL', parsed.passed === 2 && parsed.failed === 1 && parsed.failures[0] === '乙', JSON.stringify(parsed))
 

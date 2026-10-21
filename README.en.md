@@ -13,7 +13,7 @@ Screenshot, same as QQ: the button hangs **next to the "voice" button of the cha
 | Menu item | Description |
 |---|---|
 | ✂ Screenshot | **Always select a region in the native overlay** (a real full-screen window in a separate process, so it can cover other applications) → annotate → **paste into the input box + copy to the clipboard** |
-| ⏺ Record screen | Recording with ffmpeg gdigrab (H.264 + faststart). **By default you first select a region, then record** (see below); a red frame on screen marks the boundary, and clicking "stop" on the timer pill at the top right finishes it |
+| ⏺ Record screen | Recording with ffmpeg gdigrab (H.264 + faststart). **By default you first select a region, then record** (see below); a red frame on screen marks the boundary, and clicking "stop" on the timer pill at the top right finishes it. Audio can be enabled from the menu (R41, off by default) |
 | Aa Extract text | **Offline OCR** after selecting a region (Windows built-in engine, nothing leaves the machine), producing a text panel that can be copied / pasted into the input box |
 | 译 Translate screen | After OCR, the text (with a translation-instruction prefix) is pasted into the input box and handed to DSH's own model to translate |
 | ⇕ Long screenshot | Select a region → the host scrolls one screen and captures a frame → align and stitch the overlapping area → the long image returns to the annotation UI |
@@ -171,6 +171,40 @@ Four things that are easy to overlook but each make this feature "look broken":
    internally it is **cut out with a window region** (the version using `TransparencyKey` measured zero pixels shown on screen).
    If the frame fails to come up, recording is unaffected.
 4. **The frame must be torn down when recording ends**: `record('stop')` writes the stop signal first and then kills the process; a leftover red frame is worse than not drawing one at all.
+
+## Recording audio (R41)
+
+**Menu → more settings → "record audio"**. Off by default: capturing a microphone has privacy
+implications, so a default-on switch would record the room without the user knowing. Turning it on
+asks the host for the device table first — **with no microphone the switch refuses to turn on and
+says why**; with one it names the device it will use (the pill shows `🎙 audio` / `muted`, the result
+panel shows `audio` / `⚠ no audio (not captured)`).
+
+Before R41 this feature was **dead code split across both halves**, and neither half reported anything:
+
+| Half | Old code | Effect |
+|---|---|---|
+| `client.js` | hardcoded `record('start', {audio: false, …})` | never requested sound |
+| `lib/shot.mjs` | hardcoded `-i audio=virtual-audio-capturer` | that virtual sound card does not exist here, so audio could never start |
+
+The chain now: `listCaptureDevices()` (`ffmpeg -list_devices -f dshow`) → `resolveAudioDevice()`
+(exact name / ASCII alternative match; empty = auto-prefer "microphone / stereo mix") →
+`-i audio=<real device name>` + explicit `-map 0:v:0 -map 1:a:0` + `-c:a aac`.
+
+Three **invariants**, proven live by `dev/record-audio-probe.mjs` (20 assertions):
+
+1. **A mic present must mean a real audio stream**: `hasAudio` in `record('stop')` comes from
+   `ffprobe` via `rec.ps1 info`, not from "the user asked for sound";
+2. **A missing or misspelled device must never fail the recording**: it continues silently and the
+   reply carries `audio:false` plus the `audioWarning` text, which the client must surface (a silent
+   downgrade means the user discovers the whole take is mute afterwards);
+3. **A device that cannot open (exclusive lock / driver hiccup) retries once without audio** — only
+   `dshow|audio|device`-class errors downgrade; video-side errors such as a region off-screen must
+   not be hidden behind "record it silently".
+
+> Device enumeration is **not** judged by the exit code: `-list_devices` has no real input and exits 1
+> even when nothing is found, so the only trustworthy signal is "devices were parsed". And `(none)`
+> does not mean "no device" — ffmpeg on this machine uses it to tag **video** devices.
 
 ## Recording result panel: why "extracting a frame" fails (R33)
 

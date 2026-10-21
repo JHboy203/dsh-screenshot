@@ -10,7 +10,7 @@ QQ 同款截图，按钮挂在**对话输入框「语音」键旁边**（`conver
 | 菜单项 | 说明 |
 |---|---|
 | ✂ 截图 | **一律在原生覆盖层里框选**（独立进程的全屏真窗口，能盖住别的应用）→ 标注 → **贴进输入框 + 复制到剪贴板** |
-| ⏺ 录屏 | ffmpeg gdigrab 录制（H.264 + faststart）。**默认先框一块再录**（见下），屏幕上有一圈红框标出边界，右上角计时胶囊点「停止」收尾 |
+| ⏺ 录屏 | ffmpeg gdigrab 录制（H.264 + faststart）。**默认先框一块再录**（见下），屏幕上有一圈红框标出边界，右上角计时胶囊点「停止」收尾。菜单里可开**录音**（R41，默认关） |
 | Aa 提取文字 | 框选后**离线 OCR**（Windows 自带引擎，不出本机），出可复制/可贴进输入框的文本面板 |
 | 译 屏幕翻译 | OCR 之后把文字（带翻译指令前缀）贴进输入框，交给 DSH 自己的模型翻 |
 | ⇕ 长截图 | 框选区域 → 宿主滚一屏抓一张 → 重叠区对齐拼接 → 长图回到标注界面 |
@@ -131,6 +131,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 20 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录），约 27 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -178,6 +179,35 @@ shot_bridge({action:'send', ops:[{op:'eval', js:"(()=>{const o=document.createEl
    内部用**窗口 region 挖掉**（用 `TransparencyKey` 的那个版本实测屏幕上一个像素都不显示）。
    框起不来不影响录制。
 4. **录完必须收掉框**：`record('stop')` 会先落停止信号再杀进程，残留一个红框比不画更糟。
+
+## 录屏录音（R41）
+
+**菜单 → 更多设置 → 「录屏录音」**。默认关：录屏带麦是有隐私含义的开关，默认开等于在用户
+不知情时录周围的声音。点开时先问宿主一次设备表 —— **没有麦就拒绝打开并说明**，
+有麦就说出用的是哪一块（药丸上显示 `🎙 有声` / `静音`，结果面板显示 `有声` / `⚠ 无声（没录上）`）。
+
+R41 之前这条功能是**两半各写一半的死代码**，而且两边都不报错：
+
+| 半边 | 原来的写法 | 后果 |
+|---|---|---|
+| `client.js` | `record('start', {audio: false, …})` 写死 | 永远不请求声音 |
+| `lib/shot.mjs` | `-i audio=virtual-audio-capturer` 写死 | 本机没装那块虚拟声卡，带声必失败 |
+
+现在的链路：`listCaptureDevices()`（`ffmpeg -list_devices -f dshow`）→ `resolveAudioDevice()`
+（按名字/ASCII 别名精确匹配，空 = 自动优先"麦克风/立体声混音"）→ `-i audio=<真实设备名>`
++ 显式 `-map 0:v:0 -map 1:a:0` + `-c:a aac`。
+
+三条**不变量**（都由 `dev/record-audio-probe.mjs` 现场证明，20 项断言）：
+
+1. **有麦就必须真有音轨**：`record('stop')` 的 `hasAudio` 来自 `rec.ps1 info` 的 ffprobe，
+   不是"用户选了有声"；
+2. **没麦/名字错了不许失败**：静音继续录，回执带 `audio:false` + `audioWarning` 原话，
+   客户端必须念出来（静默降级最坏的结果是用户录完一整套才发现全程无声）；
+3. **设备打不开（被独占/驱动抽风）退一次静音重试** —— 只有 `dshow|audio|device` 这类错才降级，
+   区域越界之类的视频侧错误不许拿静音去掩盖。
+
+> 设备枚举的判据**不是退出码**：`-list_devices` 没有正常输入，找不到东西时它也 exit 1，
+> 唯一能信的是"解析出了设备"。另外 `(none)` 不是"没有设备"——本机 ffmpeg 用它标**视频**设备。
 
 ## 录屏结果面板：为什么"抽一帧"会失败（R33）
 

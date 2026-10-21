@@ -28,14 +28,14 @@ window.__ModuleLoader__.load({
 		const SERVICE = 'shot'
 		const LS_KEY = 'dsh.screenshot.prefs'
 		/**
-		 * 客户端版本标记（**唯一真源**，R38）。
+		 * 客户端版本标记（**唯一真源**，R41）。
 		 *
 		 * 以前这个号在文件里出现两次（桥注册的 `build:` 与 `__dshotDebug.build`），而
 		 * `shot_health` 与回执都只看第一处 —— 只改一处时两边**一起自洽地错**，
 		 * "客户端是不是旧的"就永远判不出来（R38 实测：代码已是新的，回执还报 R33）。
 		 * 现在只有这一行，两处都引用它；`lib/health.mjs` 优先按 `CLIENT_BUILD = 'Rxx'` 读。
 		 */
-		const CLIENT_BUILD = 'R38'
+		const CLIENT_BUILD = 'R41'
 
 		/* ══════════════ 代次标记 + 跨热重载的 DOM 清理（R38）══════════════
 		 *
@@ -1621,6 +1621,14 @@ window.__ModuleLoader__.load({
 				/** 录屏结束后是否先把文件放进剪贴板（用户可以粘到任何地方）。 */
 				recClip: true,
 				/**
+				 * 录屏要不要录音（R41）。默认 **false** —— 录屏带麦是"有隐私含义"的开关：
+				 * 默认开就会在用户不知情的时候把周围的声音录进去。要用的人自己点开，
+				 * 点开时宿主枚举一次真实设备、把用的是哪块麦告诉他（菜单里也一直显示）。
+				 */
+				recAudio: false,
+				/** 指定的录音设备名（'' = 自动挑）。空着时宿主优先"麦克风/立体声混音"这类名字。 */
+				recMic: '',
+				/**
 				 * 录屏范围：
 				 *   'screen' 整个桌面（老行为）
 				 *   'pick'   每次开始录之前先用**原生覆盖层**框一块（只要矩形）
@@ -1689,6 +1697,10 @@ window.__ModuleLoader__.load({
 			/** 这一轮录的是什么范围（"整屏" / "800×600"）。DSH 在别的窗口背后时，
 			 *  用户唯一能确认"我到底录了哪块"的地方就是这颗悬浮药丸 —— 必须写清楚。 */
 			recLabel: '',
+			/** 这一轮**真的**带上麦了吗（宿主回执为准，不是偏好值：可能因没设备降级成静音）。 */
+			recAudio: false,
+			/** 实际用到的录音设备名（空 = 没录声）。药丸与结果面板都靠它说清"录的是谁"。 */
+			recMic: '',
 			/** 长截图会话的"收尾"入口：会话开着时热键再按一次 = 完成（见 runInvoke）。 */
 			longFinish: null,
 			prefs: null,
@@ -1959,7 +1971,7 @@ window.__ModuleLoader__.load({
 				const s = Math.round((Date.now() - shot.recStart) / 1000)
 				const mm = String(Math.floor(s / 60)).padStart(2, '0')
 				const ss = String(s % 60).padStart(2, '0')
-				pill._label.textContent = '录屏中 ' + mm + ':' + ss + (shot.recLabel ? ' · ' + shot.recLabel : '')
+				pill._label.textContent = '录屏中 ' + mm + ':' + ss + (shot.recLabel ? ' · ' + shot.recLabel : '') + (shot.recAudio ? ' · 🎙 有声' : ' · 静音')
 			}
 			tick()
 			clearInterval(shot.recTimer)
@@ -1995,7 +2007,13 @@ window.__ModuleLoader__.load({
 					pickedH = r.h
 				}
 			}
-			const res = await shot.api.record('start', JSON.stringify({ fps: 15, audio: false, region }))
+			/**
+			 * 录音（R41）：`audio` 由偏好决定，`mic` 空着 = 让宿主自动挑一块麦。
+			 * 以前这里写死 `audio: false`，而宿主那头写死一块本机没装的虚拟声卡 ——
+			 * 两头各写一半，合起来是一段永远不会被执行的死代码。
+			 */
+			const wantAudio = prefs().recAudio === true
+			const res = await shot.api.record('start', JSON.stringify({ fps: 15, audio: wantAudio, mic: prefs().recMic || '', region }))
 			if (res.ok !== true) return toast('录屏启动失败：' + (res.error || '未知错误'), 5000)
 			/**
 			 * **回执里的矩形才是真在录的那块**（R32）：宿主会把宽高向下取偶
@@ -2010,8 +2028,15 @@ window.__ModuleLoader__.load({
 			shot.recLabel = regionText
 			shot.recording = true
 			shot.recStart = Date.now()
+			// 回执说"带了麦"才是真带了（宿主可能因为没设备/设备打不开降级成静音）。
+			shot.recAudio = res.audio === true
+			shot.recMic = String(res.mic || '')
 			showRecPill()
-			toast('开始录屏（' + regionText + '），点右上角「停止」结束')
+			// 降级必须说话：想录音却没录上时，把宿主给的那句原话念出来。
+			// （静默降级最坏的情况是用户录完一整套才发现全程无声。）
+			if (wantAudio && !shot.recAudio && res.audioWarning) toast(String(res.audioWarning), 6000)
+			else if (shot.recAudio) toast('开始录屏（' + regionText + ' · 录音：' + (shot.recMic || '默认设备') + '），点右上角「停止」结束', 4600)
+			else toast('开始录屏（' + regionText + '），点右上角「停止」结束')
 		}
 
 		/**
@@ -2041,6 +2066,8 @@ window.__ModuleLoader__.load({
 			const pill = document.querySelector('.dshot-rec')
 			if (pill !== null) pill.remove()
 			if (res.ok !== true) return toast('录屏结束但出错：' + (res.error || '未知错误'))
+			// 说好要录音、文件里却没有音轨：必须在收尾时就说，别等用户事后听。
+			if (res.audioDropped === true) toast('这段录屏没有音轨：' + (res.mic ? '「' + res.mic + '」没录上' : '录音设备没起效'), 5200)
 			// **不再直接落盘**（用户第 3 条：录屏结束后要我自己确定存不存）。
 			// 默认先把**文件**放进剪贴板 —— 粘到资源管理器/微信/输入框都是一个真文件。
 			if (prefs().recClip !== false) {
@@ -2093,7 +2120,15 @@ window.__ModuleLoader__.load({
 			const title = document.createElement('span')
 			title.textContent = '录屏结束'
 			const meta = document.createElement('small')
-			meta.textContent = (info.width ? info.width + '×' + info.height + ' · ' : '') + fmt(dur) + ' · ' + bytes(Number(info.bytes) || 0) + ' · 还没保存'
+			/**
+			 * 音轨状态（R41）分三种，不能只写"有声/无声"：
+			 *   有音轨       → 「有声」（ffprobe 在文件里真看到 audio stream）
+			 *   想录没录上   → 「⚠ 无声（没录上）」—— 这才是需要用户注意的那种
+			 *   本来就没要   → 什么都不加（"静音录制"是用户的选择，不是待办）
+			 */
+			const audioNote = info.hasAudio === true ? ' · 有声' : info.audio === true ? ' · ⚠ 无声（没录上）' : ''
+			meta.textContent =
+				(info.width ? info.width + '×' + info.height + ' · ' : '') + fmt(dur) + ' · ' + bytes(Number(info.bytes) || 0) + audioNote + ' · 还没保存'
 			head.append(title, meta)
 
 			const stage = document.createElement('div')
@@ -3972,6 +4007,7 @@ window.__ModuleLoader__.load({
 				if (q.hotkeys) parts.push('热键开')
 				if (q.scrollMode === 'auto') parts.push('长截图自动滚')
 				if (q.recRegion === 'pick') parts.push('录屏先框一块')
+				if (q.recAudio) parts.push('录屏有声')
 				return parts.join(' · ')
 			}
 
@@ -4001,6 +4037,43 @@ window.__ModuleLoader__.load({
 						row.querySelector('span:nth-child(2)').textContent =
 							'录制范围：' + (prefs().recRegion === 'pick' ? '每次框一块' : '整个桌面')
 					}),
+					/**
+					 * 录屏录音（R41）。为什么"打开"这个动作要先问一次设备：
+					 * 这台机器可能压根没有麦（或者被别的程序独占）。开关打开了却永远录不到声音，
+					 * 比开关根本打不开更糟 —— 用户会以为录到了，事后才发现半小时素材全哑。
+					 * 所以：没有设备就**拒绝打开并说明**；有设备就告诉他用的是哪一块。
+					 */
+					item(prefs().recAudio ? '☑' : '☐', '录屏录音：' + (prefs().recAudio ? '开（自动选麦）' : '关（静音）'), '', (row) => {
+						const mark = () => {
+							row.querySelector('span:first-child').textContent = prefs().recAudio ? '☑' : '☐'
+							row.querySelector('span:nth-child(2)').textContent =
+								'录屏录音：' + (prefs().recAudio ? '开（自动选麦）' : '关（静音）')
+						}
+						if (prefs().recAudio) {
+							setPref('recAudio', false)
+							mark()
+							return toast('录屏不再录音')
+						}
+						if (shot.api === null || typeof shot.api.record !== 'function') return toast('截图服务未就绪（宿主半边没起来）')
+						void (async () => {
+							let res = null
+							try {
+								res = await shot.api.record('devices', '')
+							} catch (error) {
+								res = null
+							}
+							const mics =
+								res !== null && res.ok === true && Array.isArray(res.devices) ? res.devices.filter((d) => d !== null && d.kind === 'audio') : []
+							if (mics.length === 0) {
+								return toast('这台机器上没有可用的录音设备，录屏保持静音', 5200)
+							}
+							setPref('recAudio', true)
+							// 不把设备名钉进偏好：自动挑更耐用（换耳机、拔插都不会让旧名字失效）。
+							setPref('recMic', '')
+							mark()
+							toast('录屏会录音，使用：' + mics[0].name + (mics.length > 1 ? ' 等 ' + mics.length + ' 个设备' : ''), 5600)
+						})()
+					}, prefs().recAudio),
 					item('译', '屏幕翻译（OCR → 交给 DSH）', hkOff ? '' : hk('translate'), () => {
 						close()
 						void doNativeRegion('translate')

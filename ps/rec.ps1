@@ -216,7 +216,10 @@ function Get-MediaInfo {
   # metadata to stderr and exits 1 - that is normal, not a failure).
   param([string]$Path)
   $item = Get-Item -LiteralPath $Path
-  $meta = [ordered]@{ duration = 0.0; width = 0; height = 0; fps = 0.0; bytes = [int64]$item.Length; source = '' }
+  # audio / acodec (R41): the recording side can now capture a microphone, and "did the sound
+  # actually make it into the file" can only be answered by looking at the streams. Same pass,
+  # no extra process: ffprobe already reads format+streams, an audio stream is one more filter.
+  $meta = [ordered]@{ duration = 0.0; width = 0; height = 0; fps = 0.0; bytes = [int64]$item.Length; audio = $false; acodec = ''; source = '' }
   if ($script:ProbeExe -ne '') {
     $probeArgs = @('-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', $Path)
     $r = Invoke-Native -Exe $script:ProbeExe -ArgList $probeArgs
@@ -224,6 +227,11 @@ function Get-MediaInfo {
     if ($r.code -eq 0 -and $raw.Trim() -ne '') {
       try {
         $doc = $raw | ConvertFrom-Json
+        $auds = @($doc.streams | Where-Object { $_.codec_type -eq 'audio' })
+        if ($auds.Count -gt 0) {
+          $meta.audio = $true
+          $meta.acodec = [string]$auds[0].codec_name
+        }
         $vids = @($doc.streams | Where-Object { $_.codec_type -eq 'video' })
         if ($vids.Count -gt 0) {
           $vs = $vids[0]
@@ -261,6 +269,11 @@ function Get-MediaInfo {
   }
   if ($raw2 -match 'Video:.*?(\d+(?:\.\d+)?)\s*fps') {
     $meta.fps = [double]$Matches[1]
+  }
+  # Fallback path (no ffprobe): `ffmpeg -i` prints "  Stream #0:1: Audio: aac (LC), 48000 Hz, ...".
+  if ($raw2 -match 'Stream #\d+:\d+(?:\([^)]*\))?: Audio:\s*([A-Za-z0-9_]+)') {
+    $meta.audio = $true
+    $meta.acodec = [string]$Matches[1]
   }
   $meta.source = 'ffmpeg -i'
   if ($meta.duration -le 0 -and $meta.width -le 0) {
@@ -329,6 +342,10 @@ function Invoke-Info {
     height   = [int]$meta.height
     fps      = [double]$meta.fps
     bytes    = [int64]$meta.bytes
+    # R41: whether the file really carries an audio stream (and which codec). Ordered
+    # dictionary, so this lands after bytes in the JSON - the node side reads it by name.
+    audio    = [bool]$meta.audio
+    acodec   = [string]$meta.acodec
     source   = [string]$meta.source
   }
 }
