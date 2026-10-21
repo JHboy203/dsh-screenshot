@@ -1,4 +1,5 @@
 // dev/postwheel-probe.mjs — 判定"直接给窗口发滚轮消息"到底行不行（R27，backlog ②）。
+// args: -Hwnd <顶层窗口句柄>（**必填**）[-Delta -360] [-Root 复现 R27 的老行为]
 //
 // 用法（**必须在宿主进程里跑**，低完整性 shell 会被 UIPI 丢掉）：
 //   host_selfcheck({plugin:'dsh-screenshot', script:'dev/postwheel-probe.mjs',

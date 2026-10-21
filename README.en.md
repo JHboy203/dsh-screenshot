@@ -68,8 +68,17 @@ That is why the host side uses PowerShell/.NET:
 > These two are **the handover surface when you switch sessions**: the hardest part of verifying this plugin is not writing code, it is "how do you prove what actually happened on screen".
 > The former turns pixel criteria into a single call; the latter freezes the hurdle of "must run inside the host, each with its own arguments" into one table.
 
-### Probe list auto-discovery + run-all aggregation (R35)
+### Probe list auto-discovery + run-all aggregation (R35) · explicit args + a measured "no" to parallelism (R36)
 
+- **Declare arguments in the header (R36)**: if a probe takes command-line arguments, add one line to
+  its header comments — `// args: -Hwnd <handle> (required)`. `probe:"list"` then lists **arguments**
+  separately from **dependencies** (pyqt / JDK), and the "not run" reason in `all` carries the real
+  arguments. Without that line the catalogue can only tell you a probe exists, not how to run it.
+- **`all` stays serial — measured, not an unoptimised default (R36)**: `dev/probe-concurrency.mjs`
+  runs the same pair serially and then in parallel. Parallel is 36 % faster (101 s → 65 s) but
+  `wheel-app-qt` drops from **5 PASS to 2 PASS**: both fixtures fight over the same real cursor and
+  foreground, so each becomes the other's "environment". Real speed-up would require probes to stop
+  sharing those resources (per-fixture injection channel / separate virtual desktop).
 - **Auto-discovery**: `dev/*-probe.mjs` are collected into the list automatically (no need to edit `lib/probes.mjs`).
   But they **do not go into `all` by default** — measured, both `dev/auto-wheel-probe.mjs` and `dev/postwheel-probe.mjs` **need
   command-line arguments**, and running them with no arguments only produces meaningless results. Discovery ≠ knowing how to run it, so: they appear in `probe:"list"`, can be run by name, and
@@ -85,7 +94,7 @@ That is why the host side uses PowerShell/.NET:
 ## Self-check
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 462 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 465 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 

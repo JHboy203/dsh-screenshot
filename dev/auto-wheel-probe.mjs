@@ -1,4 +1,5 @@
 // dev/auto-wheel-probe.mjs — 验 auto 的滚轮策略判定（R27）。
+// args: 靶子矩形 "x,y,w,h"（例如 560,140,660,500；**必填**，无参跑没有意义）
 //
 // 用法（宿主进程里跑）：
 //   host_selfcheck({plugin:'dsh-screenshot', script:'dev/auto-wheel-probe.mjs',

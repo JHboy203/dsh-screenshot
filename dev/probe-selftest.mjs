@@ -114,7 +114,10 @@ const AUTODIR = path.join(LAB, 'dev')
 fs.rmSync(AUTODIR, { recursive: true, force: true })
 fs.mkdirSync(AUTODIR, { recursive: true })
 fs.writeFileSync(path.join(AUTODIR, 'alpha-probe.mjs'), '// alpha-probe.mjs -- 验证甲：自动发现的说明来自首行注释\nconsole.log("PASS x")\n')
-fs.writeFileSync(path.join(AUTODIR, 'beta-probe.mjs'), '// beta-probe.mjs -- 验证乙\nconsole.log("PASS y")\n')
+fs.writeFileSync(
+	path.join(AUTODIR, 'beta-probe.mjs'),
+	'// beta-probe.mjs -- 验证乙\n// args: -Hwnd <句柄>（必填）\nconsole.log("PASS y")\n'
+)
 fs.writeFileSync(path.join(AUTODIR, 'helper.mjs'), '// 不是探针，文件名不匹配约定\n')
 // 模拟"同一个脚本被显式表占着"（wheel-app-probe.mjs 服务 qt/java 两条探针）。
 fs.writeFileSync(path.join(AUTODIR, 'wheel-app-probe.mjs'), '// 已被显式表覆盖的脚本\n')
@@ -136,6 +139,20 @@ check(
 	'自动发现的条目带 auto 标记，且 script **解析得到真实文件**',
 	disc.found.every((f) => f.auto === true) && alpha !== undefined && path.resolve(PLUGIN_ROOT, alpha.script) === path.resolve(AUTODIR, 'alpha-probe.mjs'),
 	alpha?.script
+)
+// R36：`// args:` 头 → 清单里能说清"这条要什么参数"（R35 的自动发现只是让它出现，说不出怎么跑）。
+const beta = disc.found.find((f) => f.id === 'beta')
+check(
+	'头部 `// args:` 被解析成 needsArgs + 人话提示（没说的一律 needsArgs:false）',
+	beta !== undefined && beta.needsArgs === true && /-Hwnd/.test(beta.argsHint) && alpha?.needsArgs === false,
+	`beta=${JSON.stringify(beta?.argsHint)} alpha.needsArgs=${alpha?.needsArgs}`
+)
+check(
+	'显式表里带固定参数的探针也带 needsArgs（从 args 或 argsHint 推出来）',
+	listProbes()
+		.filter((e) => e.name === 'wheel-app-qt' || e.name === 'wheel-app-java')
+		.every((e) => e.needsArgs === true && e.argsHint !== ''),
+	''
 )
 
 const merged = listProbes({ dir: AUTODIR })
@@ -182,12 +199,17 @@ check('聚合：includeHeavy 下整体仍然 ok=false（重活那条真失败）
 
 // R35 实测出来的边界：`dev/` 里被自动发现的两个探针（auto-wheel / postwheel）**都要命令行参数**，
 // 无参跑只会有无意义结果 —— 所以"被发现"不等于"能进 all"。
-const FAKE2 = [...FAKE, { name: 'auto1', script: 'dev/auto1-probe.mjs', args: [], timeoutSec: 10, about: '自动', heavy: false, auto: true, needs: '' }]
+const FAKE2 = [...FAKE, { name: 'auto1', script: 'dev/auto1-probe.mjs', args: [], timeoutSec: 10, about: '自动', heavy: false, auto: true, needs: '', argsHint: '-Hwnd <句柄>（必填）', needsArgs: true }]
 const noAuto = await runProbes({ probes: 'all', entries: FAKE2, runner: fakeRunner })
 check(
 	'聚合：自动发现的**默认不进 all**（不知道要什么参数），但在 skipped 里说明原因',
 	noAuto.probes.length === 3 && noAuto.skipped.some((s) => s.name === 'auto1' && /参数/.test(s.why)),
 	`跑了 ${noAuto.probes.map((p) => p.probe).join(',')} · skipped=${noAuto.skipped.map((s) => s.name).join(',')}`
+)
+check(
+	'skipped 的原因里带**具体要什么参数**（不是一句"见头注释"）',
+	noAuto.skipped.some((s) => s.name === 'auto1' && /-Hwnd/.test(s.why)),
+	noAuto.skipped.find((s) => s.name === 'auto1')?.why ?? ''
 )
 const yesAuto = await runProbes({ probes: 'all', entries: FAKE2, runner: fakeRunner, includeAuto: true })
 check('聚合：includeAuto:true 时自动发现的才进 all', yesAuto.probes.length === 4 && yesAuto.probes.some((p) => p.probe === 'auto1'), `跑了 ${yesAuto.probes.map((p) => p.probe).join(',')}`)

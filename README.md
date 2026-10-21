@@ -66,7 +66,7 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 > 这两个是**换会话时的交接面**：验证这个插件最费劲的不是写代码，是"怎么证明屏幕上真的发生了
 > 什么"。前者把像素判据变成一次调用，后者把"必须在宿主里跑、各有各的参数"的门槛固化成一张表。
 
-### 探针清单自动发现 + 全跑聚合（R35）
+### 探针清单自动发现 + 全跑聚合（R35）、清单说清参数 + 并行实测（R36）
 
 - **自动发现**：`dev/*-probe.mjs` 会被自动收进清单（不用改 `lib/probes.mjs`）。
   但它**默认不进 `all`** —— 实测 `dev/auto-wheel-probe.mjs` / `dev/postwheel-probe.mjs` 都**需要
@@ -79,11 +79,18 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
   `reason:"env"`，聚合里单独标 `ENV` 并给出处置话术。它既不算通过，也不算产品回归 ——
   混成一个红会把人往错的方向查（本轮实测：QQ / DSH 盖住夹具时 `wheel-target` 4 项全红，
   全是假红）。
+- **参数写进头部（R36）**：探针认命令行参数就在头部加一行
+  `// args: -Hwnd <句柄>（必填）` → `probe:"list"` 把「参数」与「依赖」（pyqt / JDK）分开列出，
+  `all` 的"未跑"原因也带具体参数。没有这一行，清单只能告诉你它存在，不告诉你它怎么跑。
+- **`all` 保持串行 —— 这是量过的结论，不是没做优化（R36）**：`dev/probe-concurrency.mjs`
+  在同一批次里串行/并行各跑一遍：并行快 36%（101s → 65s），但 `wheel-app-qt` 从 **5 PASS 掉到
+  2 PASS**。原因是两个夹具在**抢同一套真实光标与前台**，彼此成了对方的"环境"。
+  要真正提速，得先让探针不再共享这些资源（每夹具自己的注入通道 / 独立虚拟桌面），那是另一个量级。
 
 ## 自检
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 462 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 465 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
@@ -108,7 +115,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 33 项：像素库/探针库自检（1 秒，确定性）
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',

@@ -714,14 +714,28 @@ export function buildShotTools(deps = {}) {
 					const lines = [`探针清单（${entries.length} 个；"自动" = dev/*-probe.mjs 里发现的，没写进显式表）`]
 					for (const e of entries) {
 						const tag = e.heavy === true ? ' [重活]' : e.auto === true ? ' [自动]' : ''
-						lines.push(`  ${e.name.padEnd(16)} ${String(e.timeoutSec).padStart(4)}s${tag}  ${e.about}${e.needs ? `（需要 ${e.needs}）` : ''}`)
+						// 依赖（pyqt / JDK）与参数（认哪些开关）分开写：两者都不决定"能不能跑"，但都决定"怎么跑"。
+						const extra = [e.needs ? `依赖 ${e.needs}` : '', e.argsHint ? `参数 ${e.argsHint}` : ''].filter((s) => s !== '').join(' · ')
+						lines.push(`  ${e.name.padEnd(16)} ${String(e.timeoutSec).padStart(4)}s${tag}  ${e.about}${extra === '' ? '' : `（${extra}）`}`)
 					}
-					lines.push('跑一个：probe:"<名字>"；全跑：probe:"all"（重活加 includeHeavy:true）。')
+					lines.push('跑一个：probe:"<名字>"（要参数的用 args 透传）；全跑：probe:"all"（重活加 includeHeavy:true）。')
 					return {
 						ok: true,
 						mode: 'list',
 						probeCount: entries.length,
-						probes: lossless(entries.map((e) => ({ name: e.name, about: e.about, timeoutSec: e.timeoutSec, heavy: e.heavy === true, auto: e.auto === true, needs: e.needs, script: e.script }))),
+						probes: lossless(
+							entries.map((e) => ({
+								name: e.name,
+								about: e.about,
+								timeoutSec: e.timeoutSec,
+								heavy: e.heavy === true,
+								auto: e.auto === true,
+								needs: e.needs,
+								argsHint: e.argsHint ?? '',
+								needsArgs: e.needsArgs === true,
+								script: e.script,
+							}))
+						),
 						text: lines.join('\n'),
 					}
 				}
