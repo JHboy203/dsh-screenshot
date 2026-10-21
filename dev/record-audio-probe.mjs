@@ -202,6 +202,31 @@ check(
 	ascii(Object.keys(svcStopShape).filter((k) => k === 'audio' || k === 'hasAudio' || k === 'audioDropped'))
 )
 
+/* 8. region type guard (R43): a wrong-typed region must FAIL, never fall back to full screen
+ * Live evidence (R43): record('start', {region:{x,y,w,h}}) used to come back ok:true / region:''
+ * and produce a 1920x1080 desktop clip -- "ask for a 64x64 corner, record everything".
+ */
+const badRegion = await svc.record('start', JSON.stringify({ fps: 15, region: { x: 0, y: 0, w: 64, h: 64 } }))
+check(
+	'service.record(start): object region -> ok:false with a "字符串" error',
+	badRegion.ok === false && /字符串/.test(String(badRegion.error)) && badRegion.recording !== true,
+	ascii({ ok: badRegion.ok, err: badRegion.error })
+)
+const leaked = shot.isRecording()
+if (leaked === true) {
+	try {
+		await shot.recordStop({})
+	} catch {}
+}
+check('service.record(start): and it did NOT start recording (no silent full-screen)', leaked === false, ascii({ recording: leaked }))
+// Second gate: shot.recordStart must reject it too, or "[object Object]" reaches ffmpeg as "region too small".
+const directBad = await shot.recordStart({ region: [0, 0, 64, 64] })
+check(
+	'shot.recordStart: array region -> ok:false (second gate, not a misleading "too small")',
+	directBad.ok === false && /字符串/.test(String(directBad.error)) && shot.isRecording() === false,
+	ascii({ ok: directBad.ok, err: directBad.error })
+)
+
 /* cleanup: three temp clips, and the red frame must be gone ---------------------- */
 for (const f of files) {
 	try {

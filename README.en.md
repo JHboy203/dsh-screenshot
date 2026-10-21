@@ -193,7 +193,7 @@ then system audio `stereo mix / loopback`, else the first audio device — the r
 choice does **not** depend on the order the OS happens to list devices in) →
 `-i audio=<real device name>` + explicit `-map 0:v:0 -map 1:a:0` + `-c:a aac`.
 
-Three **invariants**, proven live by `dev/record-audio-probe.mjs` (23 assertions):
+Three **invariants**, proven live by `dev/record-audio-probe.mjs` (26 assertions):
 
 1. **A mic present must mean a real audio stream**: `hasAudio` in `record('stop')` comes from
    `ffprobe` via `rec.ps1 info`, not from "the user asked for sound";
@@ -207,6 +207,20 @@ Three **invariants**, proven live by `dev/record-audio-probe.mjs` (23 assertions
 > Device enumeration is **not** judged by the exit code: `-list_devices` has no real input and exits 1
 > even when nothing is found, so the only trustworthy signal is "devices were parsed". And `(none)`
 > does not mean "no device" — ffmpeg on this machine uses it to tag **video** devices.
+
+### `region` takes a string only; a wrong type **must fail** (R43)
+
+`region` in `record('start', {region})` can only be `"x,y,w,h"`. `lib/service.mjs` used to read
+`typeof parsed.region === 'string' ? parsed.region : ''` — passing an **object** `{x,y,w,h}` was
+**silently replaced with empty**, so "record a 64×64 corner" became "record the whole 1920×1080 desktop"
+while the reply said `ok:true` / `region:""`. That is exactly how one end-to-end test here accidentally
+recorded the full screen.
+
+Two gates now reject it: `record('start')` in `lib/service.mjs` and `recordStart` in `lib/shot.mjs`
+both return `ok:false` with `region 只接受 "x,y,w,h" 字符串（收到 object：{…}）`, and **do not** start
+recording (a probe assertion proves nothing was started). Same principle as "a picked region that
+normalises to nothing must error" inside `recordStart`: **silently swapping a picked region for the
+full desktop records what the user never meant to share.**
 
 ## Recording result panel: why "extracting a frame" fails (R33)
 
