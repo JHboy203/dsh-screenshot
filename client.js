@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({
 		 * "客户端是不是旧的"就永远判不出来（R38 实测：代码已是新的，回执还报 R33）。
 		 * 现在只有这一行，两处都引用它；`lib/health.mjs` 优先按 `CLIENT_BUILD = 'Rxx'` 读。
 		 */
-		const CLIENT_BUILD = 'R41'
+		const CLIENT_BUILD = 'R42'
 
 		/* ══════════════ 代次标记 + 跨热重载的 DOM 清理（R38）══════════════
 		 *
@@ -4043,11 +4043,11 @@ window.__ModuleLoader__.load({
 					 * 比开关根本打不开更糟 —— 用户会以为录到了，事后才发现半小时素材全哑。
 					 * 所以：没有设备就**拒绝打开并说明**；有设备就告诉他用的是哪一块。
 					 */
-					item(prefs().recAudio ? '☑' : '☐', '录屏录音：' + (prefs().recAudio ? '开（自动选麦）' : '关（静音）'), '', (row) => {
+					item(prefs().recAudio ? '☑' : '☐', '录屏录音：' + (prefs().recAudio ? '开（自动选设备）' : '关（静音）'), '', (row) => {
 						const mark = () => {
 							row.querySelector('span:first-child').textContent = prefs().recAudio ? '☑' : '☐'
 							row.querySelector('span:nth-child(2)').textContent =
-								'录屏录音：' + (prefs().recAudio ? '开（自动选麦）' : '关（静音）')
+								'录屏录音：' + (prefs().recAudio ? '开（自动选设备）' : '关（静音）')
 						}
 						if (prefs().recAudio) {
 							setPref('recAudio', false)
@@ -4069,6 +4069,8 @@ window.__ModuleLoader__.load({
 							}
 							setPref('recAudio', true)
 							// 不把设备名钉进偏好：自动挑更耐用（换耳机、拔插都不会让旧名字失效）。
+							// 自动的档位是确定的（R42，宿主侧 resolveAudioDevice）：麦克风 > 系统音 > 第一块，
+							// 所以这里只要报出"这一次用的是哪一块"，不必让用户选。
 							setPref('recMic', '')
 							mark()
 							toast('录屏会录音，使用：' + mics[0].name + (mics.length > 1 ? ' 等 ' + mics.length + ' 个设备' : ''), 5600)

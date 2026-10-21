@@ -131,7 +131,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 20 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录），约 27 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 23 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备的档位），约 25 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -194,10 +194,12 @@ R41 之前这条功能是**两半各写一半的死代码**，而且两边都不
 | `lib/shot.mjs` | `-i audio=virtual-audio-capturer` 写死 | 本机没装那块虚拟声卡，带声必失败 |
 
 现在的链路：`listCaptureDevices()`（`ffmpeg -list_devices -f dshow`）→ `resolveAudioDevice()`
-（按名字/ASCII 别名精确匹配，空 = 自动优先"麦克风/立体声混音"）→ `-i audio=<真实设备名>`
+（按名字/ASCII 别名精确匹配；**空 want = 自动档位**：先麦克风（旁白），其次系统音
+`立体声混音 / Stereo Mix / loopback`，都没有才拿第一块 audio 设备 —— 分档是为了**与系统列出的
+先后无关**，旧写法"第一块命中大正则的"换台机器结论就变）→ `-i audio=<真实设备名>`
 + 显式 `-map 0:v:0 -map 1:a:0` + `-c:a aac`。
 
-三条**不变量**（都由 `dev/record-audio-probe.mjs` 现场证明，20 项断言）：
+三条**不变量**（都由 `dev/record-audio-probe.mjs` 现场证明，23 项断言）：
 
 1. **有麦就必须真有音轨**：`record('stop')` 的 `hasAudio` 来自 `rec.ps1 info` 的 ffprobe，
    不是"用户选了有声"；

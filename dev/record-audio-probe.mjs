@@ -96,6 +96,29 @@ check(
 const auto = shot.resolveAudioDevice(parsed, '')
 check('resolve(auto): prefers a microphone over Stereo Mix', auto.device !== null && auto.device.name.startsWith('麦克风阵列'), auto.device === null ? 'null' : ascii(auto.device.name))
 
+// R42：自动挑必须**与系统列出的顺序无关**。旧写法只看"第一块命中大正则的"，于是把两块设备的
+// 先后换一下结论就变。这三条把档位钉死：麦克风 > 系统音（中/英名都算）> 第一块。
+const reversed = shot.resolveAudioDevice(
+	[
+		{ name: 'Stereo Mix (Realtek(R) Audio)', alt: '', kind: 'audio' },
+		{ name: '麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)', alt: '', kind: 'audio' },
+	],
+	''
+)
+check('resolve(auto): order-independent (Stereo Mix listed first, mic still wins)', reversed.device !== null && reversed.device.name.startsWith('麦克风阵列'), reversed.device === null ? 'null' : ascii(reversed.device.name))
+
+const onlySystem = shot.resolveAudioDevice(
+	[
+		{ name: '线路输入 (Line In)', alt: '', kind: 'audio' },
+		{ name: '立体声混音 (Realtek(R) Audio)', alt: '', kind: 'audio' },
+	],
+	''
+)
+check('resolve(auto): with no mic, system audio (Chinese "立体声混音") is preferred over line-in', onlySystem.device !== null && onlySystem.device.name.startsWith('立体声混音'), onlySystem.device === null ? 'null' : ascii(onlySystem.device.name))
+
+const onlyLineIn = shot.resolveAudioDevice([{ name: '线路输入 (Line In)', alt: '', kind: 'audio' }], '')
+check('resolve(auto): neither tier matches -> first audio device (never fails)', onlyLineIn.device !== null && onlyLineIn.device.name.startsWith('线路输入'), onlyLineIn.device === null ? 'null' : ascii(onlyLineIn.device.name))
+
 const exact = shot.resolveAudioDevice(parsed, 'Stereo Mix (Realtek(R) Audio)')
 check('resolve(exact name): picks that device', exact.device !== null && exact.device.name === 'Stereo Mix (Realtek(R) Audio)', exact.device === null ? 'null' : ascii(exact.device.name))
 

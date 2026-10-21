@@ -188,10 +188,12 @@ Before R41 this feature was **dead code split across both halves**, and neither 
 | `lib/shot.mjs` | hardcoded `-i audio=virtual-audio-capturer` | that virtual sound card does not exist here, so audio could never start |
 
 The chain now: `listCaptureDevices()` (`ffmpeg -list_devices -f dshow`) → `resolveAudioDevice()`
-(exact name / ASCII alternative match; empty = auto-prefer "microphone / stereo mix") →
+(exact name / ASCII alternative match; **empty want = ranked auto**: microphone (narration) first,
+then system audio `stereo mix / loopback`, else the first audio device — the ranking exists so the
+choice does **not** depend on the order the OS happens to list devices in) →
 `-i audio=<real device name>` + explicit `-map 0:v:0 -map 1:a:0` + `-c:a aac`.
 
-Three **invariants**, proven live by `dev/record-audio-probe.mjs` (20 assertions):
+Three **invariants**, proven live by `dev/record-audio-probe.mjs` (23 assertions):
 
 1. **A mic present must mean a real audio stream**: `hasAudio` in `record('stop')` comes from
    `ffprobe` via `rec.ps1 info`, not from "the user asked for sound";
