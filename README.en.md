@@ -193,7 +193,7 @@ then system audio `stereo mix / loopback`, else the first audio device — the r
 choice does **not** depend on the order the OS happens to list devices in) →
 `-i audio=<real device name>` + explicit `-map 0:v:0 -map 1:a:0` + `-c:a aac`.
 
-Three **invariants**, proven live by `dev/record-audio-probe.mjs` (28 assertions):
+Three **invariants**, proven live by `dev/record-audio-probe.mjs` (29 assertions):
 
 1. **A mic present must mean a real audio stream**: `hasAudio` in `record('stop')` comes from
    `ffprobe` via `rec.ps1 info`, not from "the user asked for sound";
@@ -226,6 +226,15 @@ The same trap sat in **capture and OCR**: `cap()` / `ocr()` also read `typeof re
 All three now share one judge (`coordTypeError` in `lib/service.mjs`) that rejects and names the
 parameter plus the type actually received — because on all three paths "silently replaced with empty"
 means the same thing: **treating the whole screen as the piece you asked for.**
+
+### The device name in the UI comes from the host, the client never guesses (R44)
+
+Toggling "record audio" used to announce `using: …` taken from `devices[0]` — that is **list order**,
+not the host's choice (R42's auto tier is "mic > system audio > first"). With two devices the UI could
+name A while B is recorded. `record('devices')` now also returns `auto` / `autoReason` / `autoWarning`
+(computed by `resolveAudioDevice(list, '')` in the host); the client prefers `auto` and only falls back
+to `devices[0]` on an **older host** that lacks the field — a missing field must still produce a
+sentence rather than silence.
 
 ## Recording result panel: why "extracting a frame" fails (R33)
 

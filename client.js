@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({
 		 * "客户端是不是旧的"就永远判不出来（R38 实测：代码已是新的，回执还报 R33）。
 		 * 现在只有这一行，两处都引用它；`lib/health.mjs` 优先按 `CLIENT_BUILD = 'Rxx'` 读。
 		 */
-		const CLIENT_BUILD = 'R42'
+		const CLIENT_BUILD = 'R44'
 
 		/* ══════════════ 代次标记 + 跨热重载的 DOM 清理（R38）══════════════
 		 *
@@ -4069,11 +4069,13 @@ window.__ModuleLoader__.load({
 							}
 							setPref('recAudio', true)
 							// 不把设备名钉进偏好：自动挑更耐用（换耳机、拔插都不会让旧名字失效）。
-							// 自动的档位是确定的（R42，宿主侧 resolveAudioDevice）：麦克风 > 系统音 > 第一块，
-							// 所以这里只要报出"这一次用的是哪一块"，不必让用户选。
+							// 自动的档位是确定的（R42，宿主侧 resolveAudioDevice）：麦克风 > 系统音 > 第一块。
+							// R44：**报出来的名字必须来自宿主的挑选结果**（res.auto），不能拿 devices[0] 猜 ——
+							// 列表第一块和宿主真正挑的那块可以不是同一个（旧宿主没有 auto 时才退回猜）。
 							setPref('recMic', '')
 							mark()
-							toast('录屏会录音，使用：' + mics[0].name + (mics.length > 1 ? ' 等 ' + mics.length + ' 个设备' : ''), 5600)
+							const autoName = typeof res.auto === 'string' && res.auto !== '' ? res.auto : mics[0].name
+							toast('录屏会录音，使用：' + autoName + (mics.length > 1 ? '（共 ' + mics.length + ' 个设备，自动挑的这一个）' : ''), 5600)
 						})()
 					}, prefs().recAudio),
 					item('译', '屏幕翻译（OCR → 交给 DSH）', hkOff ? '' : hk('translate'), () => {

@@ -194,6 +194,14 @@ check(
 	svcDevs.ok === true && Array.isArray(svcDevs.devices) && svcDevs.devices.every((d) => typeof d.name === 'string' && d.name !== ''),
 	ascii({ ok: svcDevs.ok, n: Array.isArray(svcDevs.devices) ? svcDevs.devices.length : 'not-array' })
 )
+// R44: the host must say which device the AUTO tier picks -- the client used to report devices[0],
+// which is list order, not the choice (R42 made the choice "mic > system audio > first").
+const expectAuto = shot.resolveAudioDevice(svcDevs.devices ?? [], '')
+check(
+	'service.record(devices): auto names the SAME device resolveAudioDevice picks (not devices[0])',
+	svcDevs.auto === (expectAuto.device === null ? '' : expectAuto.device.name) && svcDevs.autoReason === expectAuto.reason,
+	ascii({ auto: svcDevs.auto !== '' ? '<device>' : '', reason: svcDevs.autoReason, expect: expectAuto.reason })
+)
 const svcStopShape = await svc.record('status', '')
 check(
 	'service shape: audio/mic/audioWarning/hasAudio/audioDropped all present on every reply',

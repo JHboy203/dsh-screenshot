@@ -131,7 +131,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 28 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫），约 27 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 29 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致），约 30 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -199,7 +199,7 @@ R41 之前这条功能是**两半各写一半的死代码**，而且两边都不
 先后无关**，旧写法"第一块命中大正则的"换台机器结论就变）→ `-i audio=<真实设备名>`
 + 显式 `-map 0:v:0 -map 1:a:0` + `-c:a aac`。
 
-三条**不变量**（都由 `dev/record-audio-probe.mjs` 现场证明，28 项断言）：
+三条**不变量**（都由 `dev/record-audio-probe.mjs` 现场证明，29 项断言）：
 
 1. **有麦就必须真有音轨**：`record('stop')` 的 `hasAudio` 来自 `rec.ps1 info` 的 ffprobe，
    不是"用户选了有声"；
@@ -226,6 +226,14 @@ R41 之前这条功能是**两半各写一半的死代码**，而且两边都不
 同一个坑在**截图与 OCR** 里也有：`cap()` / `ocr()` 的 `rect` 以前也是 `typeof rect === 'string' ? rect : ''`。
 它们现在共用同一条判据（`lib/service.mjs` 的 `coordTypeError`）—— 拒掉，并在错误里说清是哪个参数、
 收到了什么类型。三处一起管，是因为"静默替空"在这三条路上意味着同一件事：**把整屏当成你要的那块**。
+
+### 报出来的设备名由宿主算，界面不许猜（R44）
+
+拨开「录屏录音」时那句 `录屏会录音，使用：…` 以前取自 `devices[0]` —— 那是**列表顺序**，
+不是宿主的选择（R42 的自动档是"麦克风 > 系统音 > 第一块"）。两块设备时界面可能报 A、实际录 B。
+现在 `record('devices')` 回执除 `devices[]` 还带 `auto` / `autoReason` / `autoWarning`
+（宿主用 `resolveAudioDevice(list, '')` 算出来的），客户端优先念 `auto`；
+**旧宿主**没有这个字段时才退回 `devices[0]`（降级也要能说话，不能因为字段缺就静默）。
 
 ## 录屏结果面板：为什么"抽一帧"会失败（R33）
 
