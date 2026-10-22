@@ -368,8 +368,18 @@ check(
 	Number(stateNow.pid) > 0 && Number(stateNow.pid) !== orphanB.child.pid && String(stateNow.file) === String(afterReapStart.path),
 	ascii({ pidNew: Number(stateNow.pid) > 0, pidDiffers: Number(stateNow.pid) !== orphanB.child.pid })
 )
+// R52: recorderInventory() is the data source of the shot_reap tool -- prove it reports the live
+// recording + the state file, then reports "nothing" after stop (otherwise the tool would lie).
+const invDuring = await shot.recorderInventory()
+check(
+	'inventory(while recording): recording:true, state.pid>0, rec/ has at least one mp4',
+	invDuring.recording === true && Number(invDuring.state?.pid) > 0 && Number(invDuring.rec.files) >= 1 && Number(invDuring.rec.bytes) > 0,
+	ascii({ recording: invDuring.recording, pid: Number(invDuring.state?.pid) > 0, files: invDuring.rec.files, bytes: invDuring.rec.bytes })
+)
 const stopAfterReap = await shot.recordStop()
 check('stop: clears the state file after a normal stop', stopAfterReap.ok === true && fs.existsSync(statePath) === false, ascii({ ok: stopAfterReap.ok, stateLeft: fs.existsSync(statePath) }))
+const invAfter = await shot.recorderInventory()
+check('inventory(after stop): recording:false and no state file', invAfter.recording === false && invAfter.state === null, ascii({ recording: invAfter.recording, state: invAfter.state === null ? 'none' : 'present' }))
 try {
 	orphanB.child.kill()
 } catch {}

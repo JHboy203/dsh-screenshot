@@ -18,7 +18,7 @@
 
 import path from 'node:path'
 
-import { capture, displays, imageStats, listWindows, PLUGIN_ROOT, toDataUrl } from './lib/shot.mjs'
+import { capture, displays, imageStats, listWindows, PLUGIN_ROOT, recorderInventory, reapOrphanRecorder, toDataUrl } from './lib/shot.mjs'
 import { queueDeliver } from './lib/bus.mjs'
 import { gateRun, bridgeStatus, bridgeSend, bridgeResults, WORKSPACE } from './lib/devtools.mjs'
 import { preflightRun } from './lib/preflight.mjs'
@@ -107,6 +107,9 @@ export function buildShotTools(deps = {}) {
 	const dispFn = typeof deps.displays === 'function' ? deps.displays : displays
 	const statsFn = typeof deps.imageStats === 'function' ? deps.imageStats : imageStats
 	const healthFn = typeof deps.health === 'function' ? deps.health : runHealth
+	// R52：shot_reap 的两半都能注入 —— 自检靠它验"预览/apply/名字判据"而不真的 taskkill。
+	const inventoryFn = typeof deps.recorderInventory === 'function' ? deps.recorderInventory : recorderInventory
+	const reapFn = typeof deps.reapRecorder === 'function' ? deps.reapRecorder : reapOrphanRecorder
 	// R35：探针清单与单跑实现都能注入 —— 自检靠它验"聚合/发现"的逻辑而不真的 spawn。
 	const probeEntriesFn = typeof deps.probeEntries === 'function' ? deps.probeEntries : () => listProbes()
 	const probeRunner = typeof deps.probeRunner === 'function' ? deps.probeRunner : undefined
@@ -166,6 +169,107 @@ export function buildShotTools(deps = {}) {
 					uptimeMs: Number(res.uptimeMs) || 0,
 					error: String(res.error || ''),
 					text: String(res.text || ''),
+				}
+			},
+		},
+		/**
+		 * **R52：录制残留体检 + 清理**（把 R51 的"孤儿 ffmpeg"从"下次起录才顺手清"变成能主动查）。
+		 *
+		 * 宿主崩溃/重启时 `recordStop` 不会跑，而 ffmpeg 不会跟着退出 —— 它会一直往
+		 * `.cache/rec` 写，没有句柄、没有界面入口。换会话/接手时先跑这一条：
+		 * 默认只读，`apply:true` 才真的按三步判据清理（活得着 → 仍叫 ffmpeg.exe → taskkill）。
+		 */
+		{
+			name: 'shot_reap',
+			description:
+				'录制残留体检（只读）+ 可选清理：回答"有没有一段没人管的录制还在写盘"。' +
+				'给出内存里在不在录、rec/current.json 记的是谁（pid/文件/多久前）、那个 pid 还活着吗、' +
+				'.cache/rec 里堆了几个 mp4 / 总共多大 / 最新那个。' +
+				'`apply:true` 才真的清理 —— 判据与起录前那道相同：pid 活着、且现在仍是 ffmpeg.exe（防 pid 复用）才 taskkill。' +
+				'宿主崩溃/重启后 ffmpeg 不跟着退出，这条就是兜底；换会话接手先跑一次。',
+			parameters: {
+				type: 'object',
+				properties: {
+					apply: {
+						type: 'boolean',
+						description: '默认 false 只体检；true 才真的清理残留录制（只杀 ffmpeg.exe，不杀别的进程）。',
+					},
+				},
+			},
+			output: {
+				schema: {
+					type: 'object',
+					properties: {
+						ok: { type: 'boolean' },
+						apply: { type: 'boolean' },
+						recording: { type: 'boolean' },
+						state: { type: 'object' },
+						alive: { type: 'boolean' },
+						name: { type: 'string' },
+						pid: { type: 'number' },
+						file: { type: 'string' },
+						staleMs: { type: 'number' },
+						rec: { type: 'object' },
+						reap: { type: 'object' },
+						verdict: { type: 'string' },
+						next: { type: 'string' },
+						text: { type: 'string' },
+						error: { type: 'string' },
+					},
+				},
+				render: TOOL_OUTPUT.render,
+			},
+			async execute(args) {
+				const apply = args.apply === true
+				const before = await inventoryFn()
+				const canReap = before.state !== null && Number(before.state.pid) > 0
+				const reap = apply && canReap ? await reapFn() : null
+				const after = apply ? await inventoryFn() : null
+				const shown = after === null ? before : after
+				const mb = (n) => (Number(n) >= 1048576 ? (Number(n) / 1048576).toFixed(1) + ' MB' : Math.round(Number(n) / 1024) + ' KB')
+				const age = (ms) => {
+					const s = Math.max(0, Math.round(Number(ms) / 1000))
+					return s < 90 ? s + ' 秒' : Math.round(s / 60) + ' 分钟'
+				}
+				const st = shown.state
+				let verdict = ''
+				if (shown.recording) verdict = '正在录（内存里有这一段，状态文件也应当在）'
+				else if (st !== null && shown.alive) verdict = '⚠ 有一段没人管的录制还在写盘：current.json 的 pid 活着'
+				else if (st !== null) verdict = '有一份过期的 current.json（pid 已不在），下次起录/停止会顺手清掉'
+				else verdict = '没有残留录制'
+				let next = '不用做别的'
+				if (st !== null && shown.alive && !apply) next = '确认要清就 shot_reap({apply:true}) —— 只会杀 ffmpeg.exe'
+				else if (st !== null && !shown.alive && !apply) next = 'shot_reap({apply:true}) 会把过期状态文件删掉'
+				else if (apply) next = reap !== null && reap.reaped ? '已清掉，可以重新开始录' : '没有需要清的东西'
+				const lines = [
+					'录制残留检查',
+					'  内存：' + (shown.recording ? '在录' : '没在录'),
+					'  current.json：' +
+						(st === null
+							? '无'
+							: `pid=${Number(st.pid) || 0} · ${shown.alive ? '活着（' + (shown.name || '名字未知') + '）' : '已不在'} · ${age(shown.staleMs)}前起 · ${String(st.file || '').split(/[\\/]/).pop()}`),
+					`  缓存 rec/：${Number(shown.rec.files) || 0} 个 mp4 · 共 ${mb(shown.rec.bytes)}` +
+						(shown.rec.newestName === '' ? '' : ` · 最新 ${shown.rec.newestName}（${mb(shown.rec.newestBytes)}）`),
+					'  结论：' + verdict,
+					'  下一步：' + next,
+				]
+				if (reap !== null) lines.push(`  清理：${reap.reaped ? '已终止 pid=' + reap.pid : '未杀（reason=' + reap.reason + '）'}`)
+				return {
+					ok: shown.ok === true && (reap === null || reap.ok !== false),
+					apply,
+					recording: shown.recording === true,
+					state: shown.state === null ? {} : lossless(shown.state),
+					alive: shown.alive === true,
+					name: String(shown.name || ''),
+					pid: shown.state === null ? 0 : Number(shown.state.pid) || 0,
+					file: shown.state === null ? '' : String(shown.state.file || ''),
+					staleMs: Number(shown.staleMs) || 0,
+					rec: lossless(shown.rec || {}),
+					reap: reap === null ? {} : lossless(reap),
+					verdict,
+					next,
+					text: lines.join('\n'),
+					error: String(shown.error || ''),
 				}
 			},
 		},

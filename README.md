@@ -51,12 +51,13 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
 3. **含中文的 .ps1 必须带 UTF-8 BOM**：Windows PowerShell 5.1 对无 BOM 的 .ps1 按 GBK 解码，
    中文注释会被撕碎，甚至**吞掉后面的代码行**（症状是莫名其妙的 `LockBits`/参数类型错误）。
 
-## 宿主工具（8 个）
+## 宿主工具（11 个）
 
 | 工具 | 干什么 |
 |---|---|
 | `screenshot` / `screenshot_windows` | AI 自己抓图（不弹覆盖层、不抢前台、不动窗口），返回文件路径 |
 | `shot_health` | **换会话第一条命令**：按"文件时间 vs 进程/实例时间"回答**要不要重启** |
+| **`shot_reap`** | **录制残留体检（只读）+ 可选清理**（R52）：内存里在不在录、`rec/current.json` 记的是谁、pid 还活着吗、`rec/` 堆了几个 mp4；`apply:true` 才按三步判据清掉（活着 → 仍是 `ffmpeg.exe` → `taskkill`） |
 | `shot_gate` | 一条命令跑完闸门：默认「静态契约 + 覆盖层端到端」；**`full:true` = 交付前那一套**（再加一拍成本 + 探针聚合，约 2.5–5 分钟）；`host:true` 再加宿主全量（≈10 分钟，**不在 full 里**） |
 | `shot_bridge` | 驱动**正在运行**的客户端（state / eval / click / menu / dome / longshot） |
 | `shot_displays` | 显示器 / DPI / 负坐标体检 + 越界裁剪实测 |
