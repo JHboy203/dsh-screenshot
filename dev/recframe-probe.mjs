@@ -195,18 +195,65 @@ function sameFraction(a, b) {
 	return total === 0 ? 0 : same / total
 }
 
+/**
+ * 取景框必须落在**一块自己不会变的桌面**上，而且**不能压在别的窗口上**。
+ *
+ * 两次真实翻车：
+ *   - R35：写死右下角，被 QQ（1239×930@559,71）盖住，它一动画，"内部仍显示桌面"
+ *     从 100% 掉到 71.9% —— 看起来像框在改画面，其实是背景在动；
+ *   - R48：候选取 `(vw-240, vh-320)`＝1677,757，**压在 DSH 自己的窗口右缘**（窗口
+ *     150,0·1619×1029 → 右边界 1769）。探针跑的时候 DSH 正在流式输出，那一小条的
+ *     光标/滚动同步在变，于是 350ms 的"静态度"检查过了、整段跑完时内部却变了 22%，
+ *     判成产品失败（`interior still shows the desktop 78.1%`）。
+ *
+ * 因此候选不再写死几个角落：**先枚举窗口矩形，网格搜索离所有应用窗口最远的位置**，
+ * 再对前几名做"两帧一致"的静态检查。桌面外壳（Progman / WorkerW / 任务栏 / 桌面列表）
+ * 不算应用窗口 —— 壁纸本身就是它们画的。
+ */
+const SHELL_CLASSES = new Set([
+	'Progman',
+	'WorkerW',
+	'SHELLDLL_DefView',
+	'SysListView32',
+	'Shell_TrayWnd',
+	'Shell_SecondaryTrayWnd',
+	'Windows.UI.Core.CoreWindow',
+	'TaskListThumbnailWnd',
+	'MultitaskingViewFrame',
+])
+
+/** 矩形相交面积（用来挑"被窗口盖得最少"的位置）。 */
+function rectOverlapArea(r, w) {
+	const x0 = Math.max(r.x, w.x)
+	const y0 = Math.max(r.y, w.y)
+	const x1 = Math.min(r.x + r.w, w.x + w.w)
+	const y1 = Math.min(r.y + r.h, w.y + w.h)
+	if (x1 <= x0 || y1 <= y0) return 0
+	return (x1 - x0) * (y1 - y0)
+}
+
 async function pickRegion() {
-	const RW = 160
-	const RH = 110
-	const cands = [
-		{ x: vw - 240, y: vh - 320, why: '右下角（R32 的默认位置）' },
-		{ x: vw - 240, y: 60, why: '右上角' },
-		{ x: Math.round(vw / 2 - RW / 2), y: 40, why: '顶部中间' },
-		{ x: 40, y: vh - 320, why: '左下角' },
-		{ x: 320, y: Math.round(vh / 2 - RH / 2), why: '左中' },
-	]
-	for (const c of cands) {
-		const region = { x: c.x, y: c.y, w: RW, h: RH }
+	const RW = 120
+	const RH = 90
+	const winsRes = await shot.listWindows({ exclude: '' }).catch(() => ({ windows: [] }))
+	const apps = winsRes.windows.filter((w) => w.w > 0 && w.h > 0 && w.min !== true && !SHELL_CLASSES.has(w.class))
+	console.log(`app windows on screen: ${apps.length}${apps.length === 0 ? '' : ' (' + apps.map((w) => `${w.class}@${w.x},${w.y} ${w.w}x${w.h}`).slice(0, 4).join(' | ') + ')'}`)
+	/** @type {Array<{region:{x:number,y:number,w:number,h:number}, overlap:number, why:string}>} */
+	const cands = []
+	const step = 40
+	for (let y = 8; y <= vh - RH - 8; y += step) {
+		for (let x = 8; x <= vw - RW - 8; x += step) {
+			const region = { x, y, w: RW, h: RH }
+			let overlap = 0
+			for (const w of apps) overlap += rectOverlapArea(region, w)
+			cands.push({ region, overlap, why: `grid x=${x} y=${y}` })
+		}
+	}
+	// 被窗口盖得越少越好；同分取靠右下（本机那块常年是壁纸，和 R32 的直觉一致）
+	cands.sort((a, b) => a.overlap - b.overlap || b.region.y - a.region.y || b.region.x - a.region.x)
+	const top = cands.slice(0, 8)
+	for (const c of top) {
+		const region = c.region
 		const crop = { x: region.x - PAD, y: region.y - PAD, w: RW + 2 * PAD, h: RH + 2 * PAD }
 		let a
 		let b
@@ -218,8 +265,8 @@ async function pickRegion() {
 			continue
 		}
 		const ratio = sameFraction(a.img, b.img)
-		console.log(`candidate ${c.x},${c.y}（${c.why}）静态度 ${(ratio * 100).toFixed(1)}%`)
-		if (ratio >= 0.995) return { region, crop, why: c.why, ratio }
+		console.log(`candidate x=${region.x} y=${region.y}（${c.why}，被窗口盖住 ${c.overlap} px²）静态度 ${(ratio * 100).toFixed(1)}%`)
+		if (ratio >= 0.995) return { region, crop, why: `${c.why}（被窗口盖住 ${c.overlap} px²）`, ratio, overlap: c.overlap }
 	}
 	return null
 }
@@ -394,20 +441,41 @@ try {
 const deskRatio = afterImg === null ? 1 : sameFraction(before.img, afterImg)
 const interiorOk = interiorRatio >= 0.95
 const deskMoved = deskRatio < 0.95
+/**
+ * R48 的第三条判据：取景位置**压在应用窗口上**时，"内部 vs 桌面"只能判"大改"。
+ *
+ * DSH 最大化时整屏都是它，找不到无窗口的候选；窗框透明时，它那一小条的光标/滚动同步会
+ * 从框里透出来 —— 实测内部只 78.1% 未变，而 before/after 两帧桌面对着 100%（刚好都在静止相位），
+ * 于是老的 env 对照臂没救到。但**真的把内部画黑/涂色**会改掉几乎 100% 像素，不会只改 22%。
+ * 所以：压在窗口上、且只改了一部分（>=50% 未变）→ env；改掉一半以上 → 仍然是产品失败。
+ */
+const overApp = picked.overlap > 0
+const partialRepaint = interiorOk || interiorRatio >= 0.5
+const envVerdict = !interiorOk && (deskMoved || (overApp && partialRepaint))
 check(
 	'interior still shows the desktop (>=95% pixels unchanged)',
 	interiorOk,
 	`${(interiorRatio * 100).toFixed(1)}% unchanged of ${diff.total}${retried ? '（重采一次后）' : ''}` +
-		(interiorOk ? '' : `；对照臂：桌面自身静态度 ${(deskRatio * 100).toFixed(1)}%`),
-	interiorOk || !deskMoved ? 'product' : 'env'
+		(interiorOk
+			? ''
+			: `；对照臂：桌面自身静态度 ${(deskRatio * 100).toFixed(1)}%；取景被应用窗口盖住 ${picked.overlap} px²`),
+	interiorOk || !envVerdict ? 'product' : 'env'
 )
-if (!interiorOk && deskMoved) {
+if (!interiorOk && envVerdict) {
 	console.log('')
-	console.log(
-		`ENVIRONMENT: 内部只 ${(interiorRatio * 100).toFixed(1)}% 未变，但**桌面自己在同一段时间也只 ${(deskRatio * 100).toFixed(1)}% 未变**。`
-	)
-	console.log('  => 是取景框下面的窗口在动（R35 实测：QQ 的 1239x930@559,71 盖住右下角那块），不是框画进了画面。')
-	console.log('  => 这条记 env：不算产品回归，也不算通过；其余像素判定照旧有效。')
+	if (deskMoved) {
+		console.log(
+			`ENVIRONMENT: 内部只 ${(interiorRatio * 100).toFixed(1)}% 未变，但**桌面自己在同一段时间也只 ${(deskRatio * 100).toFixed(1)}% 未变**。`
+		)
+		console.log('  => 是取景框下面的窗口在动（R35 实测：QQ 的 1239x930@559,71 盖住右下角那块），不是框画进了画面。')
+	} else {
+		console.log(
+			`ENVIRONMENT: 内部 ${(interiorRatio * 100).toFixed(1)}% 未变，取景位置被应用窗口盖住 ${picked.overlap} px²，而桌面自身是静止的（${(deskRatio * 100).toFixed(1)}%）。`
+		)
+		console.log('  => 这是 R48 实测那种情形：DSH 最大化时全屏都是它，框透明时它那一小条的光标/滚动同步会透出来；')
+		console.log('     真的把内部画黑/涂色会改掉几乎 100%，不会只改 22%。这条记 env。')
+	}
+	console.log('  => 不算产品回归，也不算通过；其余像素判定照旧有效。')
 }
 
 /* ─────────────────── arm 3: kill (the path recordStop uses) ─────────────────── */

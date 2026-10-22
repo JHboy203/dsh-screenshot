@@ -99,6 +99,14 @@ That is why the host side uses PowerShell/.NET:
   and recording `probes[].attempts === 2`. **Real reds (exit 1 / any FAIL line) are never retried** and
   **named single runs are never retried** — retrying real reds would hide regressions, and a single run
   is exactly the one result the operator wants.
+- **`recframe` no longer puts its fixture on top of a live window (R48)**: the candidates used to be
+  hard-coded corners (bottom-right 1677,757). With DSH maximised the whole screen is DSH, so the
+  transparent frame lets that strip's caret/scrollbar animation show through — "interior only 78.1 %
+  unchanged" looked like the frame repainting the screen. The probe now enumerates window rectangles
+  with `shot.listWindows()` and **grid-searches the spot least covered by app windows** (desktop shells
+  Progman/WorkerW/taskbar excluded), then verifies 350 ms of stillness. A second rule: if the spot
+  overlaps an app window and only *part* of the interior changed (≥50 % unchanged) → **env**; an
+  interior that is really painted over changes almost 100 % and is still a FAIL.
 
 ## Self-check
 
