@@ -297,6 +297,21 @@ a result panel with an **empty path**, where every frame/trim action is doomed. 
 `path === ''` first and only says "not recording (it may have already ended)" — **no clipboard call, no
 panel**. (Verified live: 0 panels, toast text as above.)
 
+### A recording orphaned by a host crash is reaped before the next start (R51)
+
+`recording` lives in memory only. When the host is killed or restarted, `recordStop` never runs —
+but **ffmpeg does not exit with the host**. It keeps gdigrab-ing into its mp4 with no handle and no
+UI entry; the only trace is a file that keeps growing under `.cache/rec`.
+
+A successful start now writes `{pid, file, started, via}` to `rec/current.json`, and a normal stop
+removes it. **Before the next start** (and on a bare "stop" with nothing recording) the host runs
+`reapOrphanRecorder()`: (1) is the pid alive (`tasklist`, else `process.kill(pid,0)`); (2) is that
+pid **still `ffmpeg.exe`** — pids get reused, killing someone else's process is worse than leaving an
+orphan; (3) only then `taskkill /PID … /T /F` and delete the state file. A reply with
+`reapedPrev:true` means "the previous clip never finished and has been terminated". Limitation: only
+`via:'node'` (ffmpeg started directly) has a pid; under the sandbox `recspawn.ps1` starts it, so its
+`child.pid` is PowerShell — no state is written and nothing is guessed.
+
 ## Where posted wheel messages apply (measured in R32)
 
 The auto long screenshot does not move the mouse; it does `PostMessage(WM_MOUSEWHEEL)` to **the leaf control under the point**. Measured:

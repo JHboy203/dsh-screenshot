@@ -19,6 +19,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -299,6 +300,79 @@ check(
 )
 const svcStop2 = await svc.record('stop', '')
 check('service.record(stop): that one clip is real (bytes > 0)', svcStop2.ok === true && svcStop2.bytes > 0, ascii({ ok: svcStop2.ok, bytes: svcStop2.bytes }))
+
+/* 11. an orphan recorder left behind by a killed host is reaped (R51) ---------------
+ * `recording` lives in memory only. When the host is killed or restarted, recordStop never
+ * runs, but ffmpeg keeps gdigrab-ing into its mp4 forever -- no handle, no UI entry, just a
+ * file that keeps growing. R51 writes {pid,file} to rec/current.json while recording and
+ * reaps it before the next start (and on a bare stop).
+ *
+ * These arms drive the reaper directly with a *real* ffmpeg process and a hand-written
+ * state file, so they do not need a host crash: the judgement (pid alive -> still ffmpeg
+ * -> kill) is exactly the one used in production.
+ */
+const recDirPath = path.join(LAB, 'rec')
+const statePath = path.join(recDirPath, 'current.json')
+const spawnOrphan = async (tag) => {
+	fs.mkdirSync(recDirPath, { recursive: true })
+	const out = path.join(recDirPath, `orphan-${tag}.mp4`)
+	const child = spawn(shot.findFfmpeg(), ['-hide_banner', '-loglevel', 'error', '-f', 'gdigrab', '-framerate', '5', '-i', 'desktop', '-t', '30', '-y', out], { stdio: 'ignore', windowsHide: true })
+	await sleep(700)
+	return { child, out }
+}
+const waitDead = async (child, ms) => {
+	const until = Date.now() + ms
+	while (Date.now() < until) {
+		if (child.exitCode !== null || child.signalCode !== null) return true
+		await sleep(120)
+	}
+	return false
+}
+
+const orphanA = await spawnOrphan('a')
+fs.writeFileSync(statePath, JSON.stringify({ pid: orphanA.child.pid, file: orphanA.out, started: Date.now(), via: 'node' }))
+const reapA = await shot.reapOrphanRecorder()
+const deadA = await waitDead(orphanA.child, 4000)
+check(
+	'reap: an orphan ffmpeg named by current.json is killed (reason killed)',
+	reapA.reaped === true && reapA.reason === 'killed' && reapA.pid === orphanA.child.pid,
+	ascii({ reaped: reapA.reaped, reason: reapA.reason, pid: reapA.pid })
+)
+check(
+	'reap: the process is really gone, and the state file is removed',
+	deadA === true && fs.existsSync(statePath) === false,
+	ascii({ dead: deadA, stateLeft: fs.existsSync(statePath) })
+)
+const reapNone = await shot.reapOrphanRecorder()
+check('reap: with no state file it does nothing (reason none)', reapNone.reaped === false && reapNone.reason === 'none', ascii({ reaped: reapNone.reaped, reason: reapNone.reason }))
+
+const orphanB = await spawnOrphan('b')
+fs.writeFileSync(statePath, JSON.stringify({ pid: orphanB.child.pid, file: orphanB.out, started: Date.now(), via: 'node' }))
+const afterReapStart = await shot.recordStart({ fps: 10, region: REGION, audio: false })
+if (afterReapStart.path) files.push(afterReapStart.path)
+const deadB = await waitDead(orphanB.child, 4000)
+check(
+	'start: reaps the previous orphan FIRST (reapedPrev:true), then records',
+	afterReapStart.ok === true && afterReapStart.reapedPrev === true && deadB === true && fs.existsSync(statePath) === true,
+	ascii({ ok: afterReapStart.ok, reapedPrev: afterReapStart.reapedPrev, dead: deadB })
+)
+const stateNow = (() => {
+	try {
+		return JSON.parse(fs.readFileSync(statePath, 'utf8'))
+	} catch {
+		return {}
+	}
+})()
+check(
+	'start: the new recording wrote its OWN state (different pid from the reaped one)',
+	Number(stateNow.pid) > 0 && Number(stateNow.pid) !== orphanB.child.pid && String(stateNow.file) === String(afterReapStart.path),
+	ascii({ pidNew: Number(stateNow.pid) > 0, pidDiffers: Number(stateNow.pid) !== orphanB.child.pid })
+)
+const stopAfterReap = await shot.recordStop()
+check('stop: clears the state file after a normal stop', stopAfterReap.ok === true && fs.existsSync(statePath) === false, ascii({ ok: stopAfterReap.ok, stateLeft: fs.existsSync(statePath) }))
+try {
+	orphanB.child.kill()
+} catch {}
 
 /* cleanup: three temp clips, and the red frame must be gone ---------------------- */
 for (const f of files) {

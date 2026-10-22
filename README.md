@@ -288,6 +288,21 @@ path required"；再打开一个 **path 为空的结果面板**，里面每条�
 现在 stop 先判 `path === ''`：只说一句「当前没有在录屏（可能已经结束了）」，**不碰剪贴板、不开面板**。
 （真机验过：面板数 0、toast 原文如上。）
 
+### 宿主崩溃留下的孤儿录制，下次起录前清掉（R51）
+
+`recording` 只在内存里。宿主被结束/重启时 `recordStop` 不会跑，而 **ffmpeg 不会跟着退出** ——
+它会一直 gdigrab 写那个 mp4，没有句柄、没有界面入口，唯一痕迹是 `.cache/rec` 里一颗一直长胖的文件。
+
+现在起录成功时把 `{pid, file, started, via}` 写到 `rec/current.json`，正常 stop 时删掉；
+**下一次起录前**（以及"没有在录时点了停止"）先跑 `reapOrphanRecorder()`：
+
+1. `tasklist` 查这个 pid 还活着吗（拿不到就退 `process.kill(pid,0)`）；
+2. 那个 pid **现在还是 `ffmpeg.exe`** 吗 —— pid 会被系统复用，杀别人的进程比留着孤儿更糟；
+3. 才 `taskkill /PID … /T /F`，并删掉状态文件。
+
+回执里 `reapedPrev:true` 表示"上一段没收尾、已经被终止"。局限：只有 `via:'node'`（直接起 ffmpeg）
+才有 pid；沙箱里 `recspawn.ps1` 代起时 `child.pid` 是 PowerShell，**不落状态、也不去猜**。
+
 ## 投递滚轮的适用范围（R32 实测）
 
 auto 长截图不移动鼠标，而是 `PostMessage(WM_MOUSEWHEEL)` 给**点位下面的叶子控件**。已实测：
