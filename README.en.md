@@ -200,7 +200,7 @@ then system audio `stereo mix / loopback`, else the first audio device — the r
 choice does **not** depend on the order the OS happens to list devices in) →
 `-i audio=<real device name>` + explicit `-map 0:v:0 -map 1:a:0` + `-c:a aac`.
 
-Three **invariants**, proven live by `dev/record-audio-probe.mjs` (31 assertions):
+Three **invariants**, proven live by `dev/record-audio-probe.mjs` (33 assertions):
 
 1. **A mic present must mean a real audio stream**: `hasAudio` in `record('stop')` comes from
    `ffprobe` via `rec.ps1 info`, not from "the user asked for sound";
@@ -259,6 +259,12 @@ branch and gets the actually-recording region/width/height/audio/mic — the cal
 what it asked for is what is being recorded. The mutex is a module-level `starting` promise
 (`let starting = null` + a waiting loop + `run.finally`) wrapping `startOnce`: **one start, one
 ffmpeg, one file**. Two probe arms prove it live (same path / `already:true` / exactly one new mp4).
+
+R48 closed a **reply whitelist** gap: `service.mjs` did not forward `already`, so on the live host two
+concurrent `record('start')` replies both said `already: undefined` — "two ok + the same path" was
+indistinguishable from "two successful starts". `recFields` now defaults `already:false` and the start
+branch carries `already: res.already === true`; one more probe arm asserts the service-level second
+start returns `already:true` with the same path.
 
 ## Recording result panel: why "extracting a frame" fails (R33)
 

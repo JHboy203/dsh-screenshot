@@ -282,6 +282,24 @@ check(
 	ascii({ added: afterRace - beforeRace, stopOk: raceStop.ok, bytes: raceStop.bytes })
 )
 
+/* 10. the SERVICE must expose "this was already recording" (R48) ------------------
+ * R47 serializes concurrent starts inside shot.mjs, but service.mjs is a **whitelist**:
+ * a field it does not copy is invisible to every caller above it. Live evidence from the
+ * running host (R47 re-check): two concurrent record('start') replies both had
+ * `already: undefined`, i.e. "two ok + one path" -- indistinguishable from two starts.
+ * The second start here is sequential (the first is still recording) = the same branch.
+ */
+const svcStart1 = await svc.record('start', JSON.stringify({ fps: 10, region: REGION, audio: false }))
+const svcStart2 = await svc.record('start', JSON.stringify({ fps: 10, region: REGION, audio: false }))
+if (svcStart1.path) files.push(svcStart1.path)
+check(
+	'service.record(start): second call -> already:true + SAME path (not a second clip)',
+	svcStart1.ok === true && svcStart2.ok === true && svcStart2.already === true && svcStart2.path === svcStart1.path && svcStart2.path !== '',
+	ascii({ a: { ok: svcStart1.ok, already: svcStart1.already === true }, b: { ok: svcStart2.ok, already: svcStart2.already === true, same: svcStart2.path === svcStart1.path } })
+)
+const svcStop2 = await svc.record('stop', '')
+check('service.record(stop): that one clip is real (bytes > 0)', svcStop2.ok === true && svcStop2.bytes > 0, ascii({ ok: svcStop2.ok, bytes: svcStop2.bytes }))
+
 /* cleanup: three temp clips, and the red frame must be gone ---------------------- */
 for (const f of files) {
 	try {

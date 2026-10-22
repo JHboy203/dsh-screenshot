@@ -137,7 +137,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 31 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行），约 35 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 33 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already），约 35 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -205,7 +205,7 @@ R41 之前这条功能是**两半各写一半的死代码**，而且两边都不
 先后无关**，旧写法"第一块命中大正则的"换台机器结论就变）→ `-i audio=<真实设备名>`
 + 显式 `-map 0:v:0 -map 1:a:0` + `-c:a aac`。
 
-三条**不变量**（都由 `dev/record-audio-probe.mjs` 现场证明，31 项断言）：
+三条**不变量**（都由 `dev/record-audio-probe.mjs` 现场证明，33 项断言）：
 
 1. **有麦就必须真有音轨**：`record('stop')` 的 `hasAudio` 来自 `rec.ps1 info` 的 ffprobe，
    不是"用户选了有声"；
@@ -255,6 +255,11 @@ region/width/height/audio/mic，调用方看得见"你要的"和"在录的"是�
 模块级 `starting` 承诺（`let starting = null` + 排队 while + `run.finally`），只包住
 `startOnce`：**一次 `start`、一个 ffmpeg、一个文件**。探针里两臂现场证明（同一 path /
 `already:true` / 只多一个 mp4）。
+
+R48 补了一处**回执白名单**：`service.mjs` 以前不转发 `already`，活宿主上两次并发 `record('start')`
+的回执都是 `already: undefined` —— 调用方只看到"两个 ok + 同一个 path"，分不清是"两次都成功"
+还是"第二次被并进来了"。现在 `recFields` 有默认 `already:false`，start 分支带
+`already: res.already === true`；探针再加一臂（service 级第二次 start → `already:true` + 同一 path）。
 
 ## 录屏结果面板：为什么"抽一帧"会失败（R33）
 
