@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({
 		 * "客户端是不是旧的"就永远判不出来（R38 实测：代码已是新的，回执还报 R33）。
 		 * 现在只有这一行，两处都引用它；`lib/health.mjs` 优先按 `CLIENT_BUILD = 'Rxx'` 读。
 		 */
-		const CLIENT_BUILD = 'R44'
+		const CLIENT_BUILD = 'R50'
 
 		/* ══════════════ 代次标记 + 跨热重载的 DOM 清理（R38）══════════════
 		 *
@@ -2066,6 +2066,18 @@ window.__ModuleLoader__.load({
 			const pill = document.querySelector('.dshot-rec')
 			if (pill !== null) pill.remove()
 			if (res.ok !== true) return toast('录屏结束但出错：' + (res.error || '未知错误'))
+			/**
+			 * R50：**没有在录时按停止**（连点两下 / 上一段已经结束）—— `record('stop')` 是幂等的，
+			 * 回 `ok:true` 但 `path:''`。以前这里不判空，于是：
+			 *   ① 拿空 path 去调 `clip`，弹一句"录屏已结束，但没能放进剪贴板：path required"；
+			 *   ② 再打开一个 **path 为空的结果面板**，里面每一条抽帧/剪辑都注定失败。
+			 * 两句误导的提示 + 一个坏面板，全是因为"停止"把"本来就没在录"当成了成功。
+			 * 这里如实说一句就返回，不碰剪贴板、不开面板。
+			 */
+			if (String(res.path || '') === '') {
+				toast('当前没有在录屏（可能已经结束了）', 3600)
+				return
+			}
 			// 说好要录音、文件里却没有音轨：必须在收尾时就说，别等用户事后听。
 			if (res.audioDropped === true) toast('这段录屏没有音轨：' + (res.mic ? '「' + res.mic + '」没录上' : '录音设备没起效'), 5200)
 			// **不再直接落盘**（用户第 3 条：录屏结束后要我自己确定存不存）。

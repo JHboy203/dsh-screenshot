@@ -288,6 +288,15 @@ switching to a normal recording, the panel then reported `frame produced no file
    `bytes === 0` or a 0 duration and **errors out directly**, bringing out the tail of ffmpeg's stderr — that sentence is the clue
    that can be tracked down next time.
 
+### Pressing "stop" while not recording opens no panel (R50)
+
+`record('stop')` is **idempotent**: with nothing recording it returns `ok:true` + `path:''`. The client
+only looked at `ok`, so a double-click on stop (or a recording that had just ended) would: call `clip`
+with an empty path → "recording ended, but could not put it on the clipboard: path required"; then open
+a result panel with an **empty path**, where every frame/trim action is doomed. Now stop checks
+`path === ''` first and only says "not recording (it may have already ended)" — **no clipboard call, no
+panel**. (Verified live: 0 panels, toast text as above.)
+
 ## Where posted wheel messages apply (measured in R32)
 
 The auto long screenshot does not move the mouse; it does `PostMessage(WM_MOUSEWHEEL)` to **the leaf control under the point**. Measured:
