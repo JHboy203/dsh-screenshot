@@ -4,18 +4,29 @@
 //   1. the frame really appears on the screen  (a window that reports Visible=true and paints
 //      nothing is exactly the failure this probe was written after -- see the note below)
 //   2. the border sits OUTSIDE the captured rect   -> not one frame pixel lands in the video
-//   3. the INTERIOR is transparent (desktop content preserved), not blacked out
+//   3. the INTERIOR is transparent (the content underneath is preserved), not blacked out
 //   4. the interior is NOT key-coloured (a TransparencyKey leak would look like a magenta slab)
 //   5. the stop file closes it, and killing the process also closes it (both paths are used)
 //
 // HOW TO RUN (must be the HOST context -- a window created from the sandboxed shell never reaches
 // the interactive desktop, so the capture sees a bare wall and every pixel assertion fails):
 //   host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})
+//   shot_probe({probe:'recframe'})
 //
 // WHY PIXELS: the first version of this probe only checked "the process is alive" and "a window
 // with that pid is visible". Both were true while the screen showed nothing at all -- the window
 // was created on a non-interactive desktop. Visibility is not the property we care about; the
 // property is "these pixels are on the user's screen, and they are not inside the video".
+//
+// WHY A FIXTURE UNDERNEATH (R53): the interior check used to compare two captures of the DESKTOP,
+// which meant it measured the desktop as much as the frame. Three rounds of patching that
+// (R35: a hard-coded corner was covered by QQ; R48: the candidate sat on the streaming DSH window;
+// R49: grid-search for "least covered + static") ended at the same place: on 2026-10-24 this
+// desktop (DSH 1619x1029@150,0 + Settings 1920x1020 + Explorer 1268x759) had exactly ONE static
+// slot left, 120x90 at (8,968), and the SAME code scored 12/12 on one run and 11/12 in the
+// aggregate. So the frame now sits on top of dev/recframe-backdrop.ps1 -- a window that paints a
+// checkerboard whose colours and cell size are known -- and the assertion becomes "at this screen
+// position the expected colour is still there". No timing, no desktop state, no other window.
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
@@ -27,11 +38,20 @@ const PLUGIN = path.dirname(HERE)
 const LAB = path.join('D:\\信息库\\AI工作区', '.tmp-shot-lab', 'recframe')
 const FRAME = path.join(PLUGIN, 'ps', 'recframe.ps1')
 const CAPTURE = path.join(PLUGIN, 'ps', 'capture.ps1')
+const BACKDROP = path.join(HERE, 'recframe-backdrop.ps1')
 const THICK = 3
 /** Border colour used by ps/recframe.ps1 (Color.FromArgb(255, 235, 64, 52)). */
 const BORDER = [235, 64, 52]
 /** TransparencyKey used by ps/recframe.ps1. */
 const KEY = [255, 0, 255]
+/** Checkerboard colours painted by dev/recframe-backdrop.ps1. */
+const DARK = [30, 36, 48]
+const LIGHT = [216, 222, 233]
+/** Cell size asked of the backdrop (the fixture echoes the effective one back in its Info file). */
+const CELL = 30
+/** The window being recorded. Small on purpose: the crop is REGION + 2*PAD. */
+const RW = 120
+const RH = 90
 
 const shot = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'shot.mjs')).href)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -49,13 +69,6 @@ fs.mkdirSync(LAB, { recursive: true })
 
 /* ─────────────────── where to put it ─────────────────── */
 
-/**
- * 取景框必须落在**一块自己不会变的桌面**上。R32 时写死了右下角（"那个位置在任何布局下都是壁纸"）——
- * R35 实测这个假设会失效：QQ 的窗口 1239×930@559,71 把右下角盖住了，它一动画，
- * "内部仍显示桌面"就从 100.0% 掉到 **71.9%**，看起来像框在改画面，其实是背景在动。
- * 所以改成**实测挑点**（见 pickRegion）：候选位置各拍两帧，选第一块"两帧完全一致"的。
- * 一块都找不到 → 退 2（环境：屏幕上没有静态区域），一条像素判定都不打。
- */
 const disp = await shot.displays()
 const vw = Number(disp.virtual?.w) || 1920
 const vh = Number(disp.virtual?.h) || 1080
@@ -95,24 +108,44 @@ function countIn(img, x0, y0, x1, y1, test) {
 	return n
 }
 
-/** Bounding box of the pixels matching `test`, or null. Lets a probe say "drawn at 192x96" --
- *  the signature of a DPI-virtualised window -- instead of only "some pixels". */
-function bboxOf(img, test) {
+/** The canary window is a SOLID lime block, so only pixels sitting in a horizontal run of at least
+ *  `minRun` lime pixels are evidence. This is not fussiness: the crop around (40,40) reaches x=286,
+ *  and the DSH window starts at x=150 -- so the strip below/right of the canary is whatever DSH is
+ *  painting at that moment. On 2026-10-24 the aggregate run found 42 isolated lime-ish pixels there
+ *  and the bbox grew from 240x120 to 240x126, which the DPI assertion read as "the window is drawn
+ *  at 0.8 scale" (a 6px height error). The single run passed. A verdict that depends on the
+ *  colours behind the fixture is a verdict about the desktop, not about the window.
+ *  A genuinely DPI-virtualised window is still caught: its rows are 192 px runs, far above minRun,
+ *  so the box comes back 192x96. */
+function solidLime(img, minRun) {
+	const isLime = (c) => c[1] > 180 && c[0] < 120 && c[2] < 120
 	let x0 = Infinity
 	let y0 = Infinity
 	let x1 = -1
 	let y1 = -1
+	let count = 0
 	for (let y = 0; y < img.height; y++) {
-		for (let x = 0; x < img.width; x++) {
-			if (!test(img.at(x, y))) continue
-			if (x < x0) x0 = x
-			if (y < y0) y0 = y
-			if (x > x1) x1 = x
-			if (y > y1) y1 = y
+		let run = 0
+		let start = 0
+		for (let x = 0; x <= img.width; x++) {
+			const on = x < img.width && isLime(img.at(x, y))
+			if (on) {
+				if (run === 0) start = x
+				run++
+				continue
+			}
+			if (run >= minRun) {
+				count += run
+				if (start < x0) x0 = start
+				if (x - 1 > x1) x1 = x - 1
+				if (y < y0) y0 = y
+				if (y > y1) y1 = y
+			}
+			run = 0
 		}
 	}
-	if (x1 < 0) return null
-	return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }
+	if (x1 < 0) return { count: 0, box: null }
+	return { count, box: { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } }
 }
 
 /** Four bands just OUTSIDE the region (in crop coordinates). */
@@ -177,114 +210,6 @@ async function waitForFile(file, ms) {
 	return false
 }
 
-/* ─────────────────── 挑一块真正静态的取景位置 ─────────────────── */
-/** 两张同尺寸图里"逐像素一致"的比例（容差 6，和 interiorDiff 同口径）。 */
-function sameFraction(a, b) {
-	let same = 0
-	let total = 0
-	const w = Math.min(a.width, b.width)
-	const h = Math.min(a.height, b.height)
-	for (let y = 0; y < h; y++) {
-		for (let x = 0; x < w; x++) {
-			const p = a.at(x, y)
-			const q = b.at(x, y)
-			total++
-			if (Math.abs(p[0] - q[0]) <= 6 && Math.abs(p[1] - q[1]) <= 6 && Math.abs(p[2] - q[2]) <= 6) same++
-		}
-	}
-	return total === 0 ? 0 : same / total
-}
-
-/**
- * 取景框必须落在**一块自己不会变的桌面**上，而且**不能压在别的窗口上**。
- *
- * 两次真实翻车：
- *   - R35：写死右下角，被 QQ（1239×930@559,71）盖住，它一动画，"内部仍显示桌面"
- *     从 100% 掉到 71.9% —— 看起来像框在改画面，其实是背景在动；
- *   - R48：候选取 `(vw-240, vh-320)`＝1677,757，**压在 DSH 自己的窗口右缘**（窗口
- *     150,0·1619×1029 → 右边界 1769）。探针跑的时候 DSH 正在流式输出，那一小条的
- *     光标/滚动同步在变，于是 350ms 的"静态度"检查过了、整段跑完时内部却变了 22%，
- *     判成产品失败（`interior still shows the desktop 78.1%`）。
- *
- * 因此候选不再写死几个角落：**先枚举窗口矩形，网格搜索离所有应用窗口最远的位置**，
- * 再对前几名做"两帧一致"的静态检查。桌面外壳（Progman / WorkerW / 任务栏 / 桌面列表）
- * 不算应用窗口 —— 壁纸本身就是它们画的。
- */
-const SHELL_CLASSES = new Set([
-	'Progman',
-	'WorkerW',
-	'SHELLDLL_DefView',
-	'SysListView32',
-	'Shell_TrayWnd',
-	'Shell_SecondaryTrayWnd',
-	'Windows.UI.Core.CoreWindow',
-	'TaskListThumbnailWnd',
-	'MultitaskingViewFrame',
-])
-
-/** 矩形相交面积（用来挑"被窗口盖得最少"的位置）。 */
-function rectOverlapArea(r, w) {
-	const x0 = Math.max(r.x, w.x)
-	const y0 = Math.max(r.y, w.y)
-	const x1 = Math.min(r.x + r.w, w.x + w.w)
-	const y1 = Math.min(r.y + r.h, w.y + w.h)
-	if (x1 <= x0 || y1 <= y0) return 0
-	return (x1 - x0) * (y1 - y0)
-}
-
-async function pickRegion() {
-	const RW = 120
-	const RH = 90
-	const winsRes = await shot.listWindows({ exclude: '' }).catch(() => ({ windows: [] }))
-	const apps = winsRes.windows.filter((w) => w.w > 0 && w.h > 0 && w.min !== true && !SHELL_CLASSES.has(w.class))
-	console.log(`app windows on screen: ${apps.length}${apps.length === 0 ? '' : ' (' + apps.map((w) => `${w.class}@${w.x},${w.y} ${w.w}x${w.h}`).slice(0, 4).join(' | ') + ')'}`)
-	/** @type {Array<{region:{x:number,y:number,w:number,h:number}, overlap:number, why:string}>} */
-	const cands = []
-	const step = 40
-	for (let y = 8; y <= vh - RH - 8; y += step) {
-		for (let x = 8; x <= vw - RW - 8; x += step) {
-			const region = { x, y, w: RW, h: RH }
-			let overlap = 0
-			for (const w of apps) overlap += rectOverlapArea(region, w)
-			cands.push({ region, overlap, why: `grid x=${x} y=${y}` })
-		}
-	}
-	// 被窗口盖得越少越好；同分取靠右下（本机那块常年是壁纸，和 R32 的直觉一致）
-	cands.sort((a, b) => a.overlap - b.overlap || b.region.y - a.region.y || b.region.x - a.region.x)
-	const top = cands.slice(0, 8)
-	for (const c of top) {
-		const region = c.region
-		const crop = { x: region.x - PAD, y: region.y - PAD, w: RW + 2 * PAD, h: RH + 2 * PAD }
-		let a
-		let b
-		try {
-			a = await capture('pick-a', crop)
-			await sleep(350)
-			b = await capture('pick-b', crop)
-		} catch {
-			continue
-		}
-		const ratio = sameFraction(a.img, b.img)
-		console.log(`candidate x=${region.x} y=${region.y}（${c.why}，被窗口盖住 ${c.overlap} px²）静态度 ${(ratio * 100).toFixed(1)}%`)
-		if (ratio >= 0.995) return { region, crop, why: `${c.why}（被窗口盖住 ${c.overlap} px²）`, ratio, overlap: c.overlap }
-	}
-	return null
-}
-
-const picked = await pickRegion()
-if (picked === null) {
-	console.log('')
-	console.log('ENVIRONMENT: 屏幕上找不到一块 350ms 内不变化的区域（5 个候选全在动）。')
-	console.log('  => "内部仍显示桌面"这条判据无法成立；像素判定全部作废 —— 这不是框的问题。')
-	console.log('1 PASS / 1 FAIL(env)')
-	process.exit(2)
-}
-REGION = picked.region
-CROP = { ...picked.crop }
-console.log(
-	`screen ${vw}x${vh} · region ${REGION.w}x${REGION.h}@${REGION.x},${REGION.y}（${picked.why}，静态度 ${(picked.ratio * 100).toFixed(1)}%）· dpi mixed=${disp.mixedDpi} negativeOrigin=${disp.negativeOrigin}`
-)
-
 /* ─────────────────── arm 0: CANARY ───────────────────
  * "A window started this way can be seen at all." Without this arm, an invisible frame is
  * indistinguishable from an environment that never showed the window (both produce zero border
@@ -314,10 +239,11 @@ canary.unref()
 const canaryUp = await waitForFile(canaryInfo, 20_000)
 await sleep(400)
 const canaryShot = await capture('canary', CANARY_CROP)
-const lime = countIn(canaryShot.img, 0, 0, canaryShot.img.width, canaryShot.img.height, (c) => c[1] > 180 && c[0] < 120 && c[2] < 120)
+const limeSeen = solidLime(canaryShot.img, CANARY.w * 0.25)
+const lime = limeSeen.count
 /** The bbox matters as much as the count: a window drawn at 0.8 scale is DPI-virtualised, and
  *  that silently moves every frame too. */
-const limeBox = bboxOf(canaryShot.img, (c) => c[1] > 180 && c[0] < 120 && c[2] < 120)
+const limeBox = limeSeen.box
 console.log(`canary: lime=${lime} bbox=${JSON.stringify(limeBox)} (crop origin ${CANARY_CROP.x},${CANARY_CROP.y}; window ${CANARY.w}x${CANARY.h}@${CANARY.x},${CANARY.y})`)
 check('CANARY: a plain window started by this probe is visible on screen', lime >= CANARY.w * CANARY.h * 0.5, `lime px=${lime} of ${CANARY.w * CANARY.h}`)
 check(
@@ -332,6 +258,119 @@ if (lime < CANARY.w * CANARY.h * 0.5) {
 	console.log(`\nENVIRONMENT: windows started from this process never reach the screen (canary x=${CANARY.x},${CANARY.y} up=${canaryUp}).`)
 	console.log('Every pixel assertion below would be meaningless, so the frame arms are SKIPPED.')
 	console.log(`\n1 PASS / 1 FAIL  (lab: ${LAB})`)
+	process.exit(2)
+}
+
+/* ─────────────────── the KNOWN-CONTENT backdrop (R53) ───────────────────
+ * The frame is placed on top of a window WE paint, so "is the interior still the old content?"
+ * becomes "is the expected checkerboard colour still at this screen position?".
+ * Topmost + foreground (AttachThreadInput first: the foreground lock refuses a plain
+ * SetForegroundWindow) because sitting under a maximized DSH is the normal case here; the frame
+ * is created afterwards, which puts it above this window.
+ */
+const BD_W = Math.min(400, Math.max(260, vw - 80))
+const BD_H = Math.min(300, Math.max(220, vh - 80))
+const BD = { x: 16, y: Math.max(8, vh - BD_H - 16), w: BD_W, h: BD_H }
+
+let backdropChild = null
+process.on('exit', () => {
+	try {
+		backdropChild?.kill()
+	} catch {}
+	try {
+		frameChild?.kill()
+	} catch {}
+})
+
+const bdInfo = path.join(LAB, 'backdrop.json')
+try {
+	fs.rmSync(bdInfo, { force: true })
+} catch {}
+const bdLog = fs.openSync(path.join(LAB, 'backdrop.log'), 'a')
+backdropChild = spawn(
+	shot.findPowershell(),
+	[
+		'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', BACKDROP,
+		'-X', String(BD.x), '-Y', String(BD.y), '-W', String(BD.w), '-H', String(BD.h),
+		'-Cell', String(CELL), '-Seconds', '180', '-Info', bdInfo,
+	],
+	{ windowsHide: false, stdio: ['ignore', bdLog, bdLog] }
+)
+try {
+	fs.closeSync(bdLog)
+} catch {}
+backdropChild.unref()
+
+const bdUp = await waitForFile(bdInfo, 20_000)
+let bd = null
+try {
+	bd = JSON.parse(fs.readFileSync(bdInfo, 'utf8'))
+} catch {}
+if (bdUp !== true || bd === null || bd.ok !== true) {
+	console.log('')
+	console.log('ENVIRONMENT: 棋盘夹具没起来（没等到 backdrop.json / ok=false）。')
+	console.log('  => 下面的取景与像素判定都没有地面真值，全部作废 —— 这不是框的问题。')
+	console.log(`\n1 PASS / 1 FAIL(env)  (lab: ${LAB})`)
+	process.exit(2)
+}
+await sleep(400)
+
+const bdRect = { x: Number(bd.x), y: Number(bd.y), w: Number(bd.w), h: Number(bd.h) }
+const cell = Number(bd.cell) || CELL
+REGION = { x: bdRect.x + Math.round((bdRect.w - RW) / 2), y: bdRect.y + Math.round((bdRect.h - RH) / 2), w: RW, h: RH }
+CROP = { x: REGION.x - PAD, y: REGION.y - PAD, w: REGION.w + 2 * PAD, h: REGION.h + 2 * PAD }
+console.log(
+	`screen ${vw}x${vh} · backdrop ${bdRect.w}x${bdRect.h}@${bdRect.x},${bdRect.y} 格子 ${cell}px（dpi ${bd.dpi ?? '?'}）· region ${REGION.w}x${REGION.h}@${REGION.x},${REGION.y} · dpi mixed=${disp.mixedDpi} negativeOrigin=${disp.negativeOrigin}`
+)
+
+check(
+	'backdrop fixture places itself exactly where it was asked (physical pixels)',
+	bdRect.x === BD.x && bdRect.y === BD.y && bdRect.w === BD.w && bdRect.h === BD.h,
+	`got ${bdRect.w}x${bdRect.h}@${bdRect.x},${bdRect.y} want ${BD.w}x${BD.h}@${BD.x},${BD.y}`
+)
+
+/** Expected colour at SCREEN position (sx,sy): the checkerboard is anchored at the backdrop's
+ *  client origin, so the index is pure arithmetic -- no capture involved. */
+function checkerAt(sx, sy) {
+	const ix = Math.floor((sx - bdRect.x) / cell)
+	const iy = Math.floor((sy - bdRect.y) / cell)
+	return (ix + iy) % 2 === 1 ? LIGHT : DARK
+}
+
+/** Walk the interior (crop coordinates -> screen coordinates) and count how many pixels still
+ *  carry the colour the checkerboard says they must have. */
+function patternStats(image) {
+	let ok = 0
+	let total = 0
+	for (let y = PAD + 2; y < PAD + REGION.h - 2; y++) {
+		for (let x = PAD + 2; x < PAD + REGION.w - 2; x++) {
+			const want = checkerAt(CROP.x + x, CROP.y + y)
+			const got = image.at(x, y)
+			total++
+			if (Math.abs(got[0] - want[0]) <= 8 && Math.abs(got[1] - want[1]) <= 8 && Math.abs(got[2] - want[2]) <= 8) ok++
+		}
+	}
+	return { ok, total, ratio: total === 0 ? 0 : ok / total }
+}
+
+/* The fixture itself has to be on screen before it can be a witness. Two different failures must
+ * not collapse into one verdict: "the window never reached the screen" is the ENVIRONMENT (exit 2,
+ * same class as the canary), while "the window is there but not the colours we computed" is our
+ * own arithmetic being wrong -- that is a red to fix, not an environment to blame. */
+const bdShot = await capture('backdrop')
+const bdPat = patternStats(bdShot.img)
+const checkerPx = countIn(bdShot.img, PAD, PAD, PAD + REGION.w, PAD + REGION.h, (c) => near(c, DARK, 10) || near(c, LIGHT, 10))
+const bdVisible = checkerPx >= REGION.w * REGION.h * 0.9
+check(
+	'backdrop fixture shows its known checkerboard where the frame will go',
+	bdVisible && bdPat.ratio >= 0.995,
+	`${(bdPat.ratio * 100).toFixed(2)}% of ${bdPat.total} px match；棋盘色像素 ${checkerPx}/${REGION.w * REGION.h}`,
+	bdVisible ? 'product' : 'env'
+)
+if (!bdVisible) {
+	console.log('')
+	console.log('ENVIRONMENT: 棋盘窗没上屏（它那块屏幕上不是棋盘色）—— 和 CANARY 同一类，先看窗口为什么被盖住。')
+	console.log(`\n1 PASS / 1 FAIL(env)  (lab: ${LAB})`)
 	process.exit(2)
 }
 
@@ -396,23 +435,9 @@ const keyPx = countIn(img, PAD, PAD, PAD + REGION.w, PAD + REGION.h, (c) => near
 check('interior is NOT blacked out', interiorLuma > 15, `luma=${interiorLuma.toFixed(1)} (>15)`)
 check('interior is NOT key-coloured (no TransparencyKey leak)', keyPx <= 2, `magenta px=${keyPx} (<=2)`)
 
-/* the strongest statement: the interior still shows what was there before the frame appeared.
- * ⚠️ R35：这条**判决必须放到关框之后** —— 判"环境还是产品"要多一条对照臂：
- * 桌面自己在同一段时间里变了没有（见 arm 2 之后的 POST 段）。 */
-let diff = interiorDiff(before.img, img)
-let retried = false
-if (diff.same / diff.total < 0.95) {
-	await sleep(600)
-	try {
-		const again = await capture('interior-retry')
-		const d2 = interiorDiff(before.img, again.img)
-		if (d2.same / d2.total > diff.same / diff.total) {
-			diff = d2
-			retried = true
-		}
-	} catch {}
-}
-const interiorRatio = diff.same / diff.total
+/* the strongest statement, and since R53 it is deterministic: the interior still carries the
+ * checkerboard the backdrop paints. Nothing about the desktop can influence this number. */
+const pat = patternStats(img)
 
 /* ─────────────────── arm 2: the stop file ─────────────────── */
 
@@ -426,57 +451,34 @@ if (!stopped) {
 	await sleep(500)
 }
 
-/* ─────────────────── POST：关框后再拍一张（对照臂） ───────────────────
- * R35 实测：取景位置在右下角，而 QQ 的窗口 1239×930@559,71 正好盖住它；QQ 一动，
- * "内部仍显示桌面"就从 100.0% 掉到 71.9% —— 看起来像框画进了画面，其实是背景在动。
- * 判别方法：**桌面自己**在这段时间里变了没有。
- *   内部变了 + 桌面也变了 → env（环境，不是产品回归）
- *   内部变了 + 桌面没变   → failed（真回归：框在改画面）
+/* ─────────────────── POST：关框后再拍一张 ───────────────────
+ * 判据换成"读回自己画的棋盘"——背景是我们自己的窗口，它不会因为别人在动画而变化，
+ * 所以"内部变了"只可能是框画上去的。不再需要 env 三态：
+ *   棋盘没上屏 → 上面已经 exit 2（环境）；棋盘上屏了却对不上 → 产品/夹具的真红。
  */
 await sleep(700)
 let afterImg = null
 try {
 	afterImg = (await capture('after')).img
 } catch {}
-const deskRatio = afterImg === null ? 1 : sameFraction(before.img, afterImg)
-const interiorOk = interiorRatio >= 0.95
-const deskMoved = deskRatio < 0.95
-/**
- * R48 的第三条判据：取景位置**压在应用窗口上**时，"内部 vs 桌面"只能判"大改"。
- *
- * DSH 最大化时整屏都是它，找不到无窗口的候选；窗框透明时，它那一小条的光标/滚动同步会
- * 从框里透出来 —— 实测内部只 78.1% 未变，而 before/after 两帧桌面对着 100%（刚好都在静止相位），
- * 于是老的 env 对照臂没救到。但**真的把内部画黑/涂色**会改掉几乎 100% 像素，不会只改 22%。
- * 所以：压在窗口上、且只改了一部分（>=50% 未变）→ env；改掉一半以上 → 仍然是产品失败。
- */
-const overApp = picked.overlap > 0
-const partialRepaint = interiorOk || interiorRatio >= 0.5
-const envVerdict = !interiorOk && (deskMoved || (overApp && partialRepaint))
+const interiorRatio = interiorDiff(before.img, img).ratio
+const patBefore = patternStats(before.img)
+const patAfter = afterImg === null ? null : patternStats(afterImg)
 check(
-	'interior still shows the desktop (>=95% pixels unchanged)',
-	interiorOk,
-	`${(interiorRatio * 100).toFixed(1)}% unchanged of ${diff.total}${retried ? '（重采一次后）' : ''}` +
-		(interiorOk
-			? ''
-			: `；对照臂：桌面自身静态度 ${(deskRatio * 100).toFixed(1)}%；取景被应用窗口盖住 ${picked.overlap} px²`),
-	interiorOk || !envVerdict ? 'product' : 'env'
+	'interior still shows the BACKDROP checkerboard (>=99.5% of pixels at the expected colour)',
+	pat.ratio >= 0.995,
+	`${(pat.ratio * 100).toFixed(2)}% of ${pat.total} px match` + (pat.ratio >= 0.995 ? '' : `；框没画上来时（before）是 ${(patBefore.ratio * 100).toFixed(2)}%`)
 )
-if (!interiorOk && envVerdict) {
-	console.log('')
-	if (deskMoved) {
-		console.log(
-			`ENVIRONMENT: 内部只 ${(interiorRatio * 100).toFixed(1)}% 未变，但**桌面自己在同一段时间也只 ${(deskRatio * 100).toFixed(1)}% 未变**。`
-		)
-		console.log('  => 是取景框下面的窗口在动（R35 实测：QQ 的 1239x930@559,71 盖住右下角那块），不是框画进了画面。')
-	} else {
-		console.log(
-			`ENVIRONMENT: 内部 ${(interiorRatio * 100).toFixed(1)}% 未变，取景位置被应用窗口盖住 ${picked.overlap} px²，而桌面自身是静止的（${(deskRatio * 100).toFixed(1)}%）。`
-		)
-		console.log('  => 这是 R48 实测那种情形：DSH 最大化时全屏都是它，框透明时它那一小条的光标/滚动同步会透出来；')
-		console.log('     真的把内部画黑/涂色会改掉几乎 100%，不会只改 22%。这条记 env。')
-	}
-	console.log('  => 不算产品回归，也不算通过；其余像素判定照旧有效。')
-}
+check(
+	'interior is unchanged while the frame is up (>=95% pixels)',
+	interiorRatio >= 0.95,
+	`${(interiorRatio * 100).toFixed(2)}% unchanged of ${interiorDiff(before.img, img).total}`
+)
+check(
+	'the backdrop is intact again after the frame closes',
+	patAfter !== null && patAfter.ratio >= 0.995,
+	patAfter === null ? 'no after-capture' : `${(patAfter.ratio * 100).toFixed(2)}% of ${patAfter.total} px match`
+)
 
 /* ─────────────────── arm 3: kill (the path recordStop uses) ─────────────────── */
 
@@ -495,6 +497,9 @@ check('killing the process closes the frame', up2 && killed, `up=${up2} exit=${f
 
 /* ─────────────────── report ─────────────────── */
 
+try {
+	backdropChild.kill()
+} catch {}
 const fails = results.filter((r) => !r.ok).length
 const productFails = results.filter((r) => !r.ok && r.env !== true).length
 console.log(`\n${results.length - fails} PASS / ${fails} FAIL  (lab: ${LAB})`)
@@ -528,5 +533,5 @@ function interiorDiff(a, bb) {
 			if (Math.abs(p[0] - q[0]) <= 6 && Math.abs(p[1] - q[1]) <= 6 && Math.abs(p[2] - q[2]) <= 6) same++
 		}
 	}
-	return { same, total }
+	return { same, total, ratio: total === 0 ? 0 : same / total }
 }

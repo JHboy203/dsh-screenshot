@@ -100,14 +100,22 @@ That is why the host side uses PowerShell/.NET:
   and recording `probes[].attempts === 2`. **Real reds (exit 1 / any FAIL line) are never retried** and
   **named single runs are never retried** — retrying real reds would hide regressions, and a single run
   is exactly the one result the operator wants.
-- **`recframe` no longer puts its fixture on top of a live window (R48)**: the candidates used to be
-  hard-coded corners (bottom-right 1677,757). With DSH maximised the whole screen is DSH, so the
-  transparent frame lets that strip's caret/scrollbar animation show through — "interior only 78.1 %
-  unchanged" looked like the frame repainting the screen. The probe now enumerates window rectangles
-  with `shot.listWindows()` and **grid-searches the spot least covered by app windows** (desktop shells
-  Progman/WorkerW/taskbar excluded), then verifies 350 ms of stillness. A second rule: if the spot
-  overlaps an app window and only *part* of the interior changed (≥50 % unchanged) → **env**; an
-  interior that is really painted over changes almost 100 % and is still a FAIL.
+- **`recframe` no longer measures the desktop (R48 → R53)**: three generations of patching — a
+  hard-coded corner (R35, covered by QQ), then "grid-search the spot least covered by app windows +
+  350 ms of stillness" (R48/R49) — were all *mitigations*. Measured 2026-10-24: with DSH
+  `1619×1029@150,0`, Settings `1920×1020` and Explorer `1268×759` on screen, the only static slot
+  left was 120×90 at `(8,968)`, and **the same code scored 12/12 on one run and 11/12 in the
+  aggregate** — the full gate sat at 3/4 for reasons that had nothing to do with the frame.
+  The frame now sits on **a window we paint ourselves** (`dev/recframe-backdrop.ps1`, 400×300,
+  30 px cells, colours known), so the interior assertion becomes "is the expected colour still at
+  this screen position" — independent of time, desktop state and other apps' animations.
+  The env tri-state went away with it (a static backdrop cannot move, so a mismatch is a real red).
+  Probe **12 → 16 checks**.
+  ⚠️ The same probe carried a **second false red of the same kind**: the canary's "drawn at physical
+  pixels" assertion took the bbox of every lime pixel in the crop, and the crop's right half reaches
+  x=286 while DSH starts at x=150 — occasional green UI pixels in DSH widened the box from 240×120 to
+  **240×126**, which read as "the window is scaled 0.8×". Only **contiguous** lime runs (≥60 px per
+  row) count as evidence now; a really scaled window still has 192 px rows and is still caught.
 
 ## Self-check
 
@@ -147,7 +155,7 @@ to verify both halves, "hide" and "restore"; it also proves that restoring **doe
 a maximized window back into a normal-sized one).
 
 ```
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 16 checks: pixel-level proof that the recording frame is on screen (R53: over a known checkerboard)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 33 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮

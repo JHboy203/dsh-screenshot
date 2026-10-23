@@ -88,11 +88,19 @@ Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击�
   `(env 重试后通过)` / `(env 重试后仍 env)`，`probes[].attempts` 如实记 2。
   **真红（exit 1 / 有 FAIL 行）永不重试**，**单跑（点名）也不重试** —— 重试真红会把回归藏起来，
   单跑是操作者要看这一次的真实结果。
-- **`recframe` 不再把取景压在活窗口上（R48）**：以前候选写死几个角落（右下角 1677,757）。
-  DSH 最大化时整屏都是它，框透明会把它那一小条的光标/滚动同步透出来 → 内部"只 78.1% 未变"，
-  看着像框改了画面。现在用 `shot.listWindows()` 枚举窗口矩形，**网格搜索被应用窗口盖得最少的位置**
-  （桌面外壳 Progman/WorkerW/任务栏不算），再验 350 ms 静态度；另外加一条判据：取景压在应用窗口上、
-  且内部只改了一部分（≥50% 未变）→ 记 **env**；**真把内部涂黑/画死会改掉几乎 100%**，仍然是 FAIL。
+- **`recframe` 的取景不再依赖桌面（R48 → R53）**：R35 写死右下角被 QQ 盖住、R48 改成"网格搜索
+  被窗口盖得最少的位置 + 350 ms 静态度"、R49 再加"压在活窗口上且只改一部分就记 env" —— 三代都是
+  **缓解**。2026-10-24 实测：DSH `1619×1029@150,0` + 设置 `1920×1020` + 资源管理器 `1268×759`
+  之后，唯一的静态候选只剩 `(8,968)` 的 120×90；**同一份代码两次跑出 12/12 与 11/12**，
+  full 闸门长期 3/4（红的是桌面，不是框）。现在把框压在**自己画的棋盘窗**
+  （`dev/recframe-backdrop.ps1`：400×300、30 px 格、颜色与格子大小都已知）上，内部判据变成
+  "那个屏幕坐标上还是不是预期颜色" —— 与时间、桌面状态、别人的动画**都无关**；
+  env 三态那套随之删掉（背景不再会动，对不上就是真红）。探针 **12 → 16 项**。
+  ⚠️ 同一条探针里还有一枚**同类的假红**：canary 的"画的是物理像素"断言原先把整张裁剪里的柠檬绿
+  像素都算进外接框，而裁剪右半边压在 DSH 窗口上（DSH 从 x=150 起，canary 240 宽），
+  DSH 界面偶发的绿点把 bbox 从 240×120 撑成 **240×126** → 读成"窗口被缩放 0.8"。
+  现在只认**成片**的绿（连续 ≥60 px 的行），孤立的绿点不算证据；真的被缩放的窗口
+  行宽是 192 px，照样抓得住。
 - **参数写进头部（R36）**：探针认命令行参数就在头部加一行
   `// args: -Hwnd <句柄>（必填）` → `probe:"list"` 把「参数」与「依赖」（pyqt / JDK）分开列出，
   `all` 的"未跑"原因也带具体参数。没有这一行，清单只能告诉你它存在，不告诉你它怎么跑。
@@ -142,8 +150,8 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 最大化窗口变回普通大小）。
 
 ```
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 12 项：录屏框在屏幕上的像素级证据
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 33 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already），约 35 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 16 项：录屏框在屏幕上的像素级证据（R53 起压在已知棋盘窗上）
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 41 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already/孤儿录制清理），约 40 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
