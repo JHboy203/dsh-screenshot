@@ -150,7 +150,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 最大化窗口变回普通大小）。
 
 ```
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 16 项：录屏框在屏幕上的像素级证据（R53 起压在已知棋盘窗上）
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 项：录屏框在屏幕上的像素级证据（R53 起压在已知棋盘窗上；R55 起自己找干净子区 + 直接问"边框那一点归谁"）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 45 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already/孤儿录制清理/recspawn 退路与它的孤儿保护），约 55 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -198,11 +198,15 @@ shot_bridge({action:'send', ops:[{op:'eval', js:"(()=>{const o=document.createEl
    屏幕上再没有别的东西能说明边界在哪。红框画在**捕获矩形之外**，所以不会被录进视频；
    内部用**窗口 region 挖掉**（用 `TransparencyKey` 的那个版本实测屏幕上一个像素都不显示）。
    框起不来不影响录制。
-   ⚠️ **"后创建"不等于"在最上面"（R54 实测）**：框是 `WS_EX_NOACTIVATE`（绝不抢焦点），
+   ⚠️ **"后创建"不等于"在最上面"（R54/R55 实测）**：框是 `WS_EX_NOACTIVATE`（绝不抢焦点），
    所以它永远不会成为前台窗口 —— 而一个**既是 TopMost、又是前台**的窗口会压住它，
    不论谁先创建。2026-10-24 实测：窗口存在、几何正确、也确实画了，屏幕上却一个红像素都没有。
-   修法是在 `Shown` 里显式 `SetWindowPos(HWND_TOPMOST, SWP_NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW)` ——
-   抬到 topmost 组的最上层，但不抢焦点、不动几何。
+   修法是 `SetWindowPos(HWND_TOPMOST, …)` 抬到 topmost 组的最上层，**并且每 250 ms 重抬一次**
+   （一次不够：同一份代码能 16/16 也能 0/0/0/0，差别只有之后有没有人把自己抬上去）。
+   ⚠️ 重抬**绝不能带 `SWP_SHOWWINDOW`**：对一个已经可见的窗口反复"显示"，Windows 每次都会重跑
+   DWM transition —— 实测把被框住的那块画面整体压暗 **17%**（`216,222,233` → `179,184,193`），
+   而那块正是**要录进视频**的区域。探针现在会同时判"边框在"与"内部 100% 还是原来的颜色"，
+   这两个一起绿才算过。
 4. **录完必须收掉框**：`record('stop')` 会先落停止信号再杀进程，残留一个红框比不画更糟。
 
 ## 录屏录音（R41）

@@ -248,8 +248,11 @@ console.log(`canary: lime=${lime} bbox=${JSON.stringify(limeBox)} (crop origin $
 check('CANARY: a plain window started by this probe is visible on screen', lime >= CANARY.w * CANARY.h * 0.5, `lime px=${lime} of ${CANARY.w * CANARY.h}`)
 check(
 	'CANARY: it is drawn at PHYSICAL coordinates (not DPI-virtualised)',
-	limeBox !== null && Math.abs(limeBox.w - CANARY.w) <= 4 && Math.abs(limeBox.h - CANARY.h) <= 4,
-	limeBox === null ? 'no lime' : `${limeBox.w}x${limeBox.h} vs ${CANARY.w}x${CANARY.h}`
+	limeBox !== null && Math.abs(limeBox.h - CANARY.h) <= 4,
+	limeBox === null
+		? 'no lime'
+		: `${limeBox.w}x${limeBox.h} vs ${CANARY.w}x${CANARY.h}` +
+			`${Math.abs(limeBox.w - CANARY.w) <= 4 ? '' : '（宽度被裁，只判高度：均匀缩放两轴同变，竖条浮层只能裁宽）'}`
 )
 try {
 	canary.kill()
@@ -317,11 +320,6 @@ await sleep(400)
 
 const bdRect = { x: Number(bd.x), y: Number(bd.y), w: Number(bd.w), h: Number(bd.h) }
 const cell = Number(bd.cell) || CELL
-REGION = { x: bdRect.x + Math.round((bdRect.w - RW) / 2), y: bdRect.y + Math.round((bdRect.h - RH) / 2), w: RW, h: RH }
-CROP = { x: REGION.x - PAD, y: REGION.y - PAD, w: REGION.w + 2 * PAD, h: REGION.h + 2 * PAD }
-console.log(
-	`screen ${vw}x${vh} · backdrop ${bdRect.w}x${bdRect.h}@${bdRect.x},${bdRect.y} 格子 ${cell}px（dpi ${bd.dpi ?? '?'}）· region ${REGION.w}x${REGION.h}@${REGION.x},${REGION.y} · dpi mixed=${disp.mixedDpi} negativeOrigin=${disp.negativeOrigin}`
-)
 
 check(
 	'backdrop fixture places itself exactly where it was asked (physical pixels)',
@@ -337,14 +335,14 @@ function checkerAt(sx, sy) {
 	return (ix + iy) % 2 === 1 ? LIGHT : DARK
 }
 
-/** Walk the interior (crop coordinates -> screen coordinates) and count how many pixels still
- *  carry the colour the checkerboard says they must have. */
-function patternStats(image) {
+/** Fraction of `box` (image coordinates) that still carries the colour the checkerboard says it
+ *  must have. `originScreen` is where this image's (0,0) sits on screen. */
+function patternRatio(image, originScreen, box) {
 	let ok = 0
 	let total = 0
-	for (let y = PAD + 2; y < PAD + REGION.h - 2; y++) {
-		for (let x = PAD + 2; x < PAD + REGION.w - 2; x++) {
-			const want = checkerAt(CROP.x + x, CROP.y + y)
+	for (let y = box.y + 2; y < box.y + box.h - 2; y++) {
+		for (let x = box.x + 2; x < box.x + box.w - 2; x++) {
+			const want = checkerAt(originScreen.x + x, originScreen.y + y)
 			const got = image.at(x, y)
 			total++
 			if (Math.abs(got[0] - want[0]) <= 8 && Math.abs(got[1] - want[1]) <= 8 && Math.abs(got[2] - want[2]) <= 8) ok++
@@ -353,26 +351,50 @@ function patternStats(image) {
 	return { ok, total, ratio: total === 0 ? 0 : ok / total }
 }
 
-/* The fixture itself has to be on screen before it can be a witness. Two different failures must
- * not collapse into one verdict: "the window never reached the screen" is the ENVIRONMENT (exit 2,
- * same class as the canary), while "the window is there but not the colours we computed" is our
- * own arithmetic being wrong -- that is a red to fix, not an environment to blame. */
-const bdShot = await capture('backdrop')
-const bdPat = patternStats(bdShot.img)
-const checkerPx = countIn(bdShot.img, PAD, PAD, PAD + REGION.w, PAD + REGION.h, (c) => near(c, DARK, 10) || near(c, LIGHT, 10))
-const bdVisible = checkerPx >= REGION.w * REGION.h * 0.9
-check(
-	'backdrop fixture shows its known checkerboard where the frame will go',
-	bdVisible && bdPat.ratio >= 0.995,
-	`${(bdPat.ratio * 100).toFixed(2)}% of ${bdPat.total} px match；棋盘色像素 ${checkerPx}/${REGION.w * REGION.h}`,
-	bdVisible ? 'product' : 'env'
-)
-if (!bdVisible) {
+/* ─────────────────── pick the sub-rect where the fixture is actually readable (R55) ───
+ * R53 solved "the desktop may change under me" by painting a KNOWN pattern. 2026-10-24 closed the
+ * other half: a 45x73 strip inside the fixture showed someone else's pixels, yet `shot.hitTest`
+ * still reported the BACKDROP at that exact point -- so the covering window was not in the normal
+ * z-order (a click-through / layered overlay). Inferring anything from those pixels would be
+ * measuring a window we do not control.
+ * The answer is the same trick one level up: search the backdrop for a 120x90 sub-rect that reads
+ * back as our own checkerboard at >=99.5%, and put the frame THERE. Deterministic, no policy about
+ * what may cover the screen -- and when nothing is clean, that is a genuine environment (exit 2).
+ */
+const fullBd = await capture('backdrop-full', bdRect)
+const STEP = 20
+let best = null
+for (let y = 0; y <= bdRect.h - RH; y += STEP) {
+	for (let x = 0; x <= bdRect.w - RW; x += STEP) {
+		const box = { x, y, w: RW, h: RH }
+		const seen = patternRatio(fullBd.img, bdRect, box)
+		if (seen.ratio < 0.995) continue
+		// Prefer the middle: keeps the PAD margin away from the window edges on all four sides.
+		const score = Math.abs(x + RW / 2 - bdRect.w / 2) + Math.abs(y + RH / 2 - bdRect.h / 2)
+		if (best === null || score < best.score) best = { box, score, ratio: seen.ratio }
+	}
+}
+if (best === null) {
+	const seen = countIn(fullBd.img, 0, 0, bdRect.w, bdRect.h, (c) => near(c, DARK, 10) || near(c, LIGHT, 10))
 	console.log('')
-	console.log('ENVIRONMENT: 棋盘窗没上屏（它那块屏幕上不是棋盘色）—— 和 CANARY 同一类，先看窗口为什么被盖住。')
+	console.log(`ENVIRONMENT: 棋盘窗里找不到一块 120x90 是干净的（整窗棋盘色像素 ${seen}/${bdRect.w * bdRect.h}）。`)
+	console.log('  多半有别的窗口压在夹具上（含 click-through 浮层）。挪开再跑 —— 这不是框的问题。')
 	console.log(`\n1 PASS / 1 FAIL(env)  (lab: ${LAB})`)
 	process.exit(2)
 }
+REGION = { x: bdRect.x + best.box.x, y: bdRect.y + best.box.y, w: RW, h: RH }
+CROP = { x: REGION.x - PAD, y: REGION.y - PAD, w: RW + 2 * PAD, h: RH + 2 * PAD }
+console.log(
+	`screen ${vw}x${vh} · backdrop ${bdRect.w}x${bdRect.h}@${bdRect.x},${bdRect.y} 格子 ${cell}px（dpi ${bd.dpi ?? '?'}）· region ${REGION.w}x${REGION.h}@${REGION.x},${REGION.y}（干净区 ${(best.ratio * 100).toFixed(2)}%）· dpi mixed=${disp.mixedDpi} negativeOrigin=${disp.negativeOrigin}`
+)
+check(
+	'found a 120x90 sub-rect where the fixture reads back as its own checkerboard',
+	best.ratio >= 0.995,
+	`${(best.ratio * 100).toFixed(2)}% at ${best.box.x},${best.box.y} of ${Math.floor((bdRect.w - RW) / STEP) + 1}x${Math.floor((bdRect.h - RH) / STEP) + 1} positions`
+)
+
+/** The frame-era measurement: the same ratio over the interior of a CROP-sized capture. */
+const patternStats = (image) => patternRatio(image, CROP, { x: PAD, y: PAD, w: REGION.w, h: REGION.h })
 
 /* ─────────────────── arm 1: the frame on screen ─────────────────── */
 
@@ -411,6 +433,25 @@ check(
 const on = await capture('on')
 const img = on.img
 check('capture size matches the requested crop', img.width === CROP.w && img.height === CROP.h, `${img.width}x${img.height} vs ${CROP.w}x${CROP.h}`)
+
+/* the direct witnesses (R55). Pixels only say what reached the screen; WindowFromPoint (via
+ * shot.hitTest) says WHO is on top at that exact point -- which is the actual property. Enumeration
+ * is not usable for this: windows.ps1 filters a 126x96 no-title tool window out, so listWindows
+ * reported the frame as hwnd -1 (measured) and a z-order index never existed.
+ * The pair is also the strongest statement about the window REGION: a point on a bar must hit the
+ * frame, a point in the middle must fall through to whatever is behind it. */
+const barHit = await shot.hitTest(CROP.x + PAD + 20, CROP.y + PAD - 2)
+const midHit = await shot.hitTest(CROP.x + PAD + Math.round(REGION.w / 2), CROP.y + PAD + Math.round(REGION.h / 2))
+check(
+	'a point on the border bar belongs to the frame (topmost, and its region covers the bars)',
+	barHit.ok === true && Number(barHit.hwnd) === Number(frameInfo?.hwnd) && Number(frameInfo?.hwnd) > 0,
+	`bar(${CROP.x + PAD + 20},${CROP.y + PAD - 2}) hwnd=${barHit.hwnd} want=${String(frameInfo?.hwnd)} zpos=${String(frameInfo?.zpos)}`
+)
+check(
+	'a point in the middle falls THROUGH the frame to the backdrop (the region really removes it)',
+	midHit.ok === true && Number(midHit.hwnd) === Number(bd.hwnd),
+	`middle hwnd=${midHit.hwnd} want=${String(bd.hwnd)}`
+)
 
 /* A wider shot is saved on every run: when a pixel assertion fails, this is the picture that
  * says whether the frame is absent, displaced, or one bar short. */
@@ -508,6 +549,11 @@ if (envFails > 0) {
 	console.log(`其中 ${envFails} 项是 env（环境挡住，见上面的 ENVIRONMENT 段）—— 不算产品回归，也不算通过。`)
 	process.exit(2)
 }
+/* R55: exit explicitly. The `shot.hitTest` calls added this round go through the resident capture
+ * helper, whose child process is kept alive on purpose -- waiting for the event loop to drain would
+ * hang the probe forever (measured: 18 PASS printed, then killed at the 240 s cap). A green run has
+ * nothing left to wait for. */
+process.exit(0)
 
 function meanLuma(image, x0 = 0, y0 = 0, x1 = image.width, y1 = image.height) {
 	let sum = 0

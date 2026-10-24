@@ -146,21 +146,35 @@ $timer.Add_Tick({
   $due = $false
   if ($StopFile -ne '' -and (Test-Path -LiteralPath $StopFile)) { $due = $true }
   if ((Get-Date) -gt $script:stopWhen) { $due = $true }
-  if ($due) { $timer.Stop(); $f.Close() }
+  if ($due) { $timer.Stop(); $f.Close() } else { Raise-ToTopmost }
 })
 
+# R55: keep re-asserting "top of the topmost band" on every tick, not just once in Shown.
+# Measured 2026-10-24: one raise at Shown was NOT enough -- the same code produced 16/16 on one run
+# and border 0/0/0/0 on the next (window created, painted, geometry reported), and the only thing
+# that differed was z-order. Something can put itself above us after we are shown (a topmost window
+# that grabs the foreground). Re-asserting is idempotent when we are already on top: same position,
+# same size, no activation, so Windows has nothing to move and nothing repaints.
+$script:zpos = $false
+function Raise-ToTopmost() {
+  # R55: NO SWP_SHOWWINDOW here on purpose. Passing it on an already-visible window makes Windows
+  # treat every call as a "show" -- and each show re-runs the DWM transition, which measured as a
+  # 17% dim of the framed area (i.e. it would have been baked into the video). The window is
+  # already visible, so raising the z-order alone is all we need.
+  try { $script:zpos = [DshRecFrameDpi]::SetWindowPos($f.Handle, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010) } catch { }
+}
+
 $f.Add_Shown({
-  # R54: raise ourselves to the TOP of the topmost band. "Created later" is not enough: a TopMost
-  # window that is also the foreground window wins the z-order, and this frame is WS_EX_NOACTIVATE
-  # by design (it must never take focus from what is being recorded). SWP_NOSIZE|NOMOVE|NOACTIVATE|
-  # SHOWWINDOW + HWND_TOPMOST = lift without stealing focus, and without changing the geometry the
-  # caller just computed.
-  try { [void][DshRecFrameDpi]::SetWindowPos($f.Handle, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010 -bor 0x0040) } catch {}
+  # R54/R55: "created later" is not "on top". A TopMost window that is ALSO the foreground window
+  # wins the z-order, and this frame is WS_EX_NOACTIVATE by design (it must never take focus from
+  # what is being recorded). SWP_NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW + HWND_TOPMOST lifts it to the
+  # top of the topmost band without stealing focus and without touching the geometry just computed.
+  Raise-ToTopmost
   $timer.Start()
   if ($Info -ne '') {
     try {
       $r = $f.RectangleToScreen($f.ClientRectangle)
-      $payload = @{ ok = $true; hwnd = [int]$f.Handle; x = $r.X; y = $r.Y; w = $r.Width; h = $r.Height; dpi = $dpi; t = $t }
+      $payload = @{ ok = $true; hwnd = [int]$f.Handle; x = $r.X; y = $r.Y; w = $r.Width; h = $r.Height; dpi = $dpi; t = $t; zpos = [bool]$script:zpos }
       [System.IO.File]::WriteAllText($Info, ($payload | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
     } catch {
       try { [System.IO.File]::WriteAllText($Info, ('{"ok":false,"error":"' + ($_ -replace '[\r\n"]', ' ') + '"}'), (New-Object System.Text.UTF8Encoding($false))) } catch {}

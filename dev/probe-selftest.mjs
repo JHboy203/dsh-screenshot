@@ -22,7 +22,7 @@ function check(item, ok, detail) {
 }
 
 const { colorFacts, diffRatio, meanLuma, parseColor, readPng } = await import('../lib/pixels.mjs')
-const { discoverProbes, listProbes, PLUGIN_ROOT, PROBES, countChecks, reasonOf, runProbe, runProbes } = await import('../lib/probes.mjs')
+const { discoverProbes, formatProbeFailures, listProbes, PLUGIN_ROOT, PROBES, countChecks, reasonOf, runProbe, runProbes } = await import('../lib/probes.mjs')
 
 /* ─────────────────── 造一张已知答案的 PNG ─────────────────── */
 // 4x4，左两列纯红 (235,64,52)，右两列纯蓝 (0,0,255)。手写 PNG：IHDR + IDAT(filter 0) + IEND。
@@ -312,6 +312,29 @@ check('reasonOf 对通过的结果给 ok（否则聚合会把绿读成红）', r
 }
 const badName = await runProbes({ probes: ['good', '没有这个'], entries: FAKE, runner: fakeRunner })
 check('聚合：点名的探针不存在时明确报错（不静默跳过）', badName.ok === false && /未知探针/.test(String(badName.text)) && /没有这个/.test(String(badName.text)), String(badName.text).slice(0, 60))
+
+/* ── R55：聚合红的时候必须说清"红在哪一条" ──
+ * 2026-10-24 一天里两次"聚合红、单跑绿"：`shot_gate` 只报 `15P/1F`，想知道红的是哪一条，
+ * 只能去 lab 目录把图逐像素复算。runProbe 其实早就算好了 failures，只是聚合侧没人用。
+ */
+{
+	const allGreen = formatProbeFailures([{ probe: 'a', ok: true }, { probe: 'b', ok: true }])
+	check('formatProbeFailures：全绿时返回空串（不往 detail 里塞噪音）', allGreen === '', JSON.stringify(allGreen))
+	const red = formatProbeFailures([
+		{ probe: 'recframe', ok: false, reason: 'failed', failures: ['border is drawn OUTSIDE the captured rect  {"top":0}'], tail: ['PASS x', 'FAIL border'] },
+	])
+	check(
+		'formatProbeFailures：贴出失败那条的**断言名与细节**（不是只给计数）',
+		/✗ recframe/.test(red) && /border is drawn OUTSIDE/.test(red) && /\{"top":0\}/.test(red),
+		String(red.split('\n')[1] ?? '').trim()
+	)
+	const envOnly = formatProbeFailures([{ probe: 'wheel-target', ok: false, reason: 'env', failures: [], tail: ['ENVIRONMENT: covered', 'PASS a'] }])
+	check(
+		'formatProbeFailures：env 单独标出来（它不是产品回归，处置方式不同）',
+		/✗ wheel-target（env/.test(envOnly) && /ENVIRONMENT: covered/.test(envOnly),
+		String(envOnly.split('\n')[1] ?? '').trim()
+	)
+}
 
 const fails = results.filter((r) => !r.ok).length
 console.log(`\n${results.length - fails} PASS / ${fails} FAIL  (lab: ${LAB})`)

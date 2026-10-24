@@ -110,7 +110,7 @@ That is why the host side uses PowerShell/.NET:
   30 px cells, colours known), so the interior assertion becomes "is the expected colour still at
   this screen position" — independent of time, desktop state and other apps' animations.
   The env tri-state went away with it (a static backdrop cannot move, so a mismatch is a real red).
-  Probe **12 → 16 checks**.
+  Probe **12 → 18 checks** (R55 added the clean-sub-rect search and two WindowFromPoint arms).
   ⚠️ The same probe carried a **second false red of the same kind**: the canary's "drawn at physical
   pixels" assertion took the bbox of every lime pixel in the crop, and the crop's right half reaches
   x=286 while DSH starts at x=150 — occasional green UI pixels in DSH widened the box from 240×120 to
@@ -155,7 +155,7 @@ to verify both halves, "hide" and "restore"; it also proves that restoring **doe
 a maximized window back into a normal-sized one).
 
 ```
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 16 checks: pixel-level proof that the recording frame is on screen (R53: over a known checkerboard)
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 33 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -194,12 +194,17 @@ Four things that are easy to overlook but each make this feature "look broken":
    nothing else on screen can indicate where the boundary is. The red frame is drawn **outside the capture rectangle**, so it never ends up in the video;
    internally it is **cut out with a window region** (the version using `TransparencyKey` measured zero pixels shown on screen).
    If the frame fails to come up, recording is unaffected.
-   ⚠️ **"Created later" does not mean "on top" (measured, R54)**: the frame is `WS_EX_NOACTIVATE`
+   ⚠️ **"Created later" does not mean "on top" (measured, R54/R55)**: the frame is `WS_EX_NOACTIVATE`
    (it must never take focus), so it can never become the foreground window — and a window that is
    **both TopMost and foreground** paints above it regardless of creation order. Measured 2026-10-24:
    the window existed, reported correct geometry and did paint, yet the capture found zero red pixels.
-   The fix is an explicit `SetWindowPos(HWND_TOPMOST, SWP_NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW)` in
-   `Shown` — top of the topmost band, without stealing focus and without touching the geometry.
+   The fix is `SetWindowPos(HWND_TOPMOST, …)` to the top of the topmost band, **re-asserted every
+   250 ms**: one raise is not enough (the same code scored 16/16 and 0/0/0/0 minutes apart; the only
+   difference was whether something raised itself afterwards).
+   ⚠️ The re-assert must **not** pass `SWP_SHOWWINDOW`. Telling Windows to "show" an already-visible
+   window re-runs the DWM transition every tick, which measured as a **17 % dim of the framed area**
+   (`216,222,233` → `179,184,193`) — and that area is exactly what gets recorded. The probe now judges
+   both "the border is there" and "the interior is still 100 % the original pixels".
 4. **The frame must be torn down when recording ends**: `record('stop')` writes the stop signal first and then kills the process; a leftover red frame is worse than not drawing one at all.
 
 ## Recording audio (R41)
