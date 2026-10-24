@@ -53,13 +53,14 @@ That is why the host side uses PowerShell/.NET:
 3. **A .ps1 containing Chinese must have a UTF-8 BOM**: Windows PowerShell 5.1 decodes a .ps1 without a BOM as GBK,
    so Chinese comments get shredded, and it can even **swallow the following code lines** (the symptom is a baffling `LockBits`/argument-type error).
 
-## Host tools (11)
+## Host tools (12)
 
 | Tool | What it does |
 |---|---|
 | `screenshot` / `screenshot_windows` | The AI captures an image itself (no overlay, no stealing the foreground, no touching windows), returns the file path |
 | `shot_health` | **The first command in a new session**: answers **whether you need to restart**, based on "file time vs process/instance time" |
 | **`shot_reap`** | **Recording-leftover check (read-only) + optional cleanup** (R52): is something recording, what `rec/current.json` names, is that pid alive, how many mp4 sit under `rec/`; `apply:true` reaps only with the three-step judge (alive → still `ffmpeg.exe` → `taskkill`) |
+| **`shot_owner`** | **"Who owns this point"** (R57): runs `WindowFromPoint` on a list of points (or a rect → centre + four corners inset by 2 px) and reports hwnd / title / class / pid. Pair it with `shot_pixels`: **colour says "mine" while this says "someone else's" → there is an overlay the screen can show but hit-testing cannot see** (click-through / layered) |
 | **`shot_preflight`** | **Verify the on-disk host half before restarting** (R40): default = probe-library selftest + full gate; name `probe-selftest` / `gate-full` / `all-probes` / `hosttest`. Verdicts come from the **conclusion line**; no conclusion line = failure. Every item runs in its own child process (those scripts call `process.exit`) |
 | **`shot_land`** | **Close the round in one call** (R40): selftests → `git add -A` → commit (message via stdin, so Chinese survives) → push → read the sha back. **dryRun by default**, refuses to commit on red selftests, rejects an empty title |
 | `shot_gate` | Runs the whole gate with one command: default = static contract + overlay end-to-end; **`full:true` = the pre-delivery set** (adds one-shot cost + probe aggregate, ≈2.5–5 min); `host:true` adds the full host suite (≈10 min, **never inside `full`**) |

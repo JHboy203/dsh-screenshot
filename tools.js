@@ -18,7 +18,7 @@
 
 import path from 'node:path'
 
-import { capture, displays, imageStats, listWindows, PLUGIN_ROOT, recorderInventory, reapOrphanRecorder, toDataUrl } from './lib/shot.mjs'
+import { capture, displays, hitTest, imageStats, listWindows, PLUGIN_ROOT, recorderInventory, reapOrphanRecorder, toDataUrl } from './lib/shot.mjs'
 import { queueDeliver } from './lib/bus.mjs'
 import { gateRun, bridgeStatus, bridgeSend, bridgeResults, WORKSPACE } from './lib/devtools.mjs'
 import { preflightRun } from './lib/preflight.mjs'
@@ -865,6 +865,108 @@ export function buildShotTools(deps = {}) {
 					range: captured === null ? '' : String(raw.rect || ''),
 					text: lines.join('\n'),
 				}
+			},
+		},
+		/**
+		 * **这一串坐标到底归谁**（R57）—— 把这一轮反复手搓的诊断固化成工具。
+		 *
+		 * 为什么需要它：2026-10-24 一天里问了三遍同一个问题 ——
+		 *   ① "夹具那块屏幕上不是棋盘色，被谁盖住了？"
+		 *   ② "边框那一点归框还是归背景？"（`region` 到底有没有生效）
+		 *   ③ "抓不到是不是被 click-through 浮层挡住了？"（`WindowFromPoint` 看不到它，但屏幕抓得到）
+		 * 每次都得写一次性脚本 + 起夹具，而答案本来就是一个 `WindowFromPoint`。
+		 *
+		 * ⚠️ 它回答的是"**这一点上最上面的那个窗口是谁**"，与"屏幕上那一点是什么颜色"是两件事：
+		 * 两者不一致时，中间就有一个**屏幕抓得到、命中测试看不到**的浮层（layered + WS_EX_TRANSPARENT），
+		 * 那正是 ① 和 ③ 的答案。所以它和 `shot_pixels` 是一对：谁与颜色对不上，谁就在撒谎。
+		 */
+		{
+			name: 'shot_owner',
+			description:
+				'"这一点归谁"：对一串屏幕坐标（或一个矩形）做 WindowFromPoint，报每个点上的窗口 hwnd/标题/类名/进程。' +
+				'排查"这块像素为什么不是我的""边框那一点归框还是归背景""抓不到是不是被盖住了"时用它，' +
+				'比截图猜快得多。给 rect 时自动取中心 + 四角内缩 2px 共 5 点。' +
+				'⚠️ 与 `shot_pixels` 配合看：颜色说这里是我的、而它说这里是别人 → 中间有**屏幕抓得到但命中测试看不到**的浮层（click-through / layered）。',
+			parameters: {
+				type: 'object',
+				properties: {
+					points: {
+						type: 'array',
+						items: { type: 'string' },
+						description: '屏幕物理坐标 "x,y" 的数组（1–12 个）。与 rect 二选一。',
+					},
+					rect: { type: 'string', description: '屏幕矩形 "x,y,w,h"：取中心 + 四角内缩 2px 共 5 点。与 points 二选一。' },
+				},
+			},
+			output: {
+				schema: {
+					type: 'object',
+					properties: {
+						ok: { type: 'boolean' },
+						points: { type: 'array' },
+						owners: { type: 'array' },
+						distinct: { type: 'number' },
+						error: { type: 'string' },
+						text: { type: 'string' },
+					},
+				},
+				render: TOOL_OUTPUT.render,
+			},
+			async execute(args) {
+				const raw = args !== null && typeof args === 'object' ? args : {}
+				const pts = []
+				const add = (x, y) => {
+					const nx = Math.round(Number(x))
+					const ny = Math.round(Number(y))
+					if (Number.isFinite(nx) && Number.isFinite(ny)) pts.push({ x: nx, y: ny })
+				}
+				if (Array.isArray(raw.points)) {
+					for (const one of raw.points.slice(0, 12)) {
+						const m = String(one).match(/^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/)
+						if (m !== null) add(m[1], m[2])
+					}
+				}
+				if (pts.length === 0 && typeof raw.rect === 'string') {
+					const m = raw.rect.match(/^\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*$/)
+					if (m !== null) {
+						const [x, y, w, h] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])]
+						add(x + Math.round(w / 2), y + Math.round(h / 2))
+						add(x + 2, y + 2)
+						add(x + w - 3, y + 2)
+						add(x + 2, y + h - 3)
+						add(x + w - 3, y + h - 3)
+					}
+				}
+				if (pts.length === 0) {
+					return { ok: false, points: [], owners: [], distinct: 0, error: 'need points[] ("x,y") or rect ("x,y,w,h")', text: '给 points（"x,y" 数组）或 rect（"x,y,w,h"）之一。' }
+				}
+
+				const rows = []
+				for (const p of pts) {
+					const h = await hitTest(p.x, p.y)
+					rows.push({ x: p.x, y: p.y, hwnd: Number(h.hwnd) || 0, title: String(h.title ?? ''), class: String(h.class ?? ''), pid: Number(h.pid) || 0, ok: h.ok === true, error: String(h.error ?? '') })
+				}
+				// 同一个窗口在多个点上出现只列一次（含命中点数），"5 个点归 2 个窗口"一眼可见。
+				const byHwnd = new Map()
+				for (const r of rows) {
+					if (r.hwnd === 0) continue
+					const cur = byHwnd.get(r.hwnd)
+					if (cur === undefined) byHwnd.set(r.hwnd, { hwnd: r.hwnd, title: r.title, class: r.class, pid: r.pid, count: 1 })
+					else cur.count += 1
+				}
+				const owners = [...byHwnd.values()].sort((a, b) => b.count - a.count)
+				const lines = [
+					`${rows.length} 个点 · 归属 ${owners.length} 个窗口：`,
+					...rows.map((r) => `  (${r.x},${r.y}) → ${r.hwnd === 0 ? '(none)' : 'hwnd ' + r.hwnd}  ${String(r.title).slice(0, 40)}` + (r.class === '' ? '' : `  [${r.class}]`) + (r.hwnd === 0 ? '  ⚠️ 这点上没有窗口' : '')),
+				]
+				if (owners.length > 1) {
+					lines.push('  ⚠️ 同一块区域归多个窗口 → 中间有东西压着；与 `shot_pixels` 对一下：颜色说是我的、这里说不是 → click-through 浮层。')
+				}
+				const none = rows.filter((r) => r.hwnd === 0)
+				if (none.length > 0) {
+					lines.push(`  ⚠️ ${none.length} 个点上没有窗口（超出虚拟屏幕？或者那块真的空着）`)
+				}
+				return { ok: true, points: rows, owners, distinct: owners.length, error: '', text: lines.join('\n') }
 			},
 		},
 		/**
