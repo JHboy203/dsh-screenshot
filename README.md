@@ -151,7 +151,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 16 项：录屏框在屏幕上的像素级证据（R53 起压在已知棋盘窗上）
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 41 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already/孤儿录制清理），约 40 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 45 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already/孤儿录制清理/recspawn 退路与它的孤儿保护），约 55 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -198,6 +198,11 @@ shot_bridge({action:'send', ops:[{op:'eval', js:"(()=>{const o=document.createEl
    屏幕上再没有别的东西能说明边界在哪。红框画在**捕获矩形之外**，所以不会被录进视频；
    内部用**窗口 region 挖掉**（用 `TransparencyKey` 的那个版本实测屏幕上一个像素都不显示）。
    框起不来不影响录制。
+   ⚠️ **"后创建"不等于"在最上面"（R54 实测）**：框是 `WS_EX_NOACTIVATE`（绝不抢焦点），
+   所以它永远不会成为前台窗口 —— 而一个**既是 TopMost、又是前台**的窗口会压住它，
+   不论谁先创建。2026-10-24 实测：窗口存在、几何正确、也确实画了，屏幕上却一个红像素都没有。
+   修法是在 `Shown` 里显式 `SetWindowPos(HWND_TOPMOST, SWP_NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW)` ——
+   抬到 topmost 组的最上层，但不抢焦点、不动几何。
 4. **录完必须收掉框**：`record('stop')` 会先落停止信号再杀进程，残留一个红框比不画更糟。
 
 ## 录屏录音（R41）
@@ -309,8 +314,15 @@ path required"；再打开一个 **path 为空的结果面板**，里面每条�
 2. 那个 pid **现在还是 `ffmpeg.exe`** 吗 —— pid 会被系统复用，杀别人的进程比留着孤儿更糟；
 3. 才 `taskkill /PID … /T /F`，并删掉状态文件。
 
-回执里 `reapedPrev:true` 表示"上一段没收尾、已经被终止"。局限：只有 `via:'node'`（直接起 ffmpeg）
-才有 pid；沙箱里 `recspawn.ps1` 代起时 `child.pid` 是 PowerShell，**不落状态、也不去猜**。
+回执里 `reapedPrev:true` 表示"上一段没收尾、已经被终止"。
+
+**两条起进程的路都被保护（R54）**：`via:'node'` 直接起 ffmpeg，pid 就是 `child.pid`；沙箱里由
+`ps/recspawn.ps1` 代起时 `child.pid` 是 PowerShell —— 所以脚本**自己**把真 ffmpeg 的 pid 写进一个
+pid 文件（`-PidFile`，`{"pid":N}`），宿主读出来照常落 `current.json`，孤儿判据对两条路完全一致。
+⚠️ 这条退路只在 node 的 `spawn` 撞上 `EPERM` 时才会走，而宿主进程从不被沙箱限制 —— 换句话说它
+**在生产里执行不到**。为了不留下"看起来活着、其实从没跑过"的分支，加了测试缝
+`DSH_SHOT_FORCE_RECSPAWN=1`（只有探针会设），`record-audio` 探针因此多出 4 条判据：真的走了
+`recspawn`、状态里记的是**真 ffmpeg**、那个 pid 还活着且确实叫 `ffmpeg.exe`、停止后 mp4 可播且状态清掉。
 
 ## 投递滚轮的适用范围（R32 实测）
 

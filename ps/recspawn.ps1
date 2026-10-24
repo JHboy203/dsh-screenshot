@@ -28,7 +28,11 @@
 param(
   [Parameter(Mandatory = $true)][string]$Exe,
   [Parameter(Mandatory = $true)][string]$ArgsFile,
-  [Parameter(Mandatory = $true)][string]$Quit
+  [Parameter(Mandatory = $true)][string]$Quit,
+  # R54: optional. When given, this wrapper writes {"pid":<ffmpeg pid>} here as soon as ffmpeg is
+  # started. The host cannot learn that pid any other way -- child.pid on this path is THIS
+  # PowerShell process, and the orphan reaper must know the real ffmpeg to protect it.
+  [string]$PidFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,6 +117,19 @@ $proc = [System.Diagnostics.Process]::Start($psi)
 if ($null -eq $proc) {
   Write-Error 'failed to start ffmpeg'
   exit 3
+}
+
+# R54: tell the host which pid to protect. Written immediately -- the host polls for this file
+# (60 ms steps, 6 s budget) and stores the pid in rec/current.json, which is the only thing the
+# orphan reaper can see. Without it a host crash during this path leaves an ffmpeg that keeps
+# gdigrab-ing forever. The file is removed by the host after reading.
+if ($PidFile -ne '') {
+  try {
+    $json = '{"pid":' + $proc.Id + '}'
+    [System.IO.File]::WriteAllText($PidFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+  } catch {
+    [Console]::Error.WriteLine('recspawn: cannot write pid file: ' + $_.Exception.Message)
+  }
 }
 
 # Poll for the quit flag. ffmpeg must keep running until then, so this loop owns the

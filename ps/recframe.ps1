@@ -67,6 +67,12 @@ using System.Windows.Forms;
 public class DshRecFrameDpi {
   [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr v);
   [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  // R54: the window is WS_EX_NOACTIVATE, so it can never become the foreground window -- and a
+  // TopMost window that IS the foreground one paints above it no matter which was created later.
+  // Measured 2026-10-24 (probe fixture as backdrop): the frame existed, reported its geometry and
+  // painted, yet the capture saw 0/0/0/0 border pixels. Explicitly moving to the top of the
+  // topmost band -- without activating -- is the only reliable answer.
+  [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 }
 
 public class DshRecFrame : Form {
@@ -144,6 +150,12 @@ $timer.Add_Tick({
 })
 
 $f.Add_Shown({
+  # R54: raise ourselves to the TOP of the topmost band. "Created later" is not enough: a TopMost
+  # window that is also the foreground window wins the z-order, and this frame is WS_EX_NOACTIVATE
+  # by design (it must never take focus from what is being recorded). SWP_NOSIZE|NOMOVE|NOACTIVATE|
+  # SHOWWINDOW + HWND_TOPMOST = lift without stealing focus, and without changing the geometry the
+  # caller just computed.
+  try { [void][DshRecFrameDpi]::SetWindowPos($f.Handle, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010 -bor 0x0040) } catch {}
   $timer.Start()
   if ($Info -ne '') {
     try {

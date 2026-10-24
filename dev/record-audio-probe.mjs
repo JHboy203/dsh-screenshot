@@ -384,6 +384,48 @@ try {
 	orphanB.child.kill()
 } catch {}
 
+/* 12. the recspawn fallback records too -- and is NOW protected from orphans (R54) ------
+ * `via:'recspawn'` was the one recording path that never ran anywhere: `spawnRecorder` only
+ * falls back to it when node's spawn dies with EPERM, and the host process is never sandboxed.
+ * So it was (a) unexercised and (b) unprotected -- its `child.pid` is PowerShell, so R51's state
+ * file skipped it and a host crash during that path leaked an ffmpeg that gdigrab-ed forever.
+ * R54 adds DSH_SHOT_FORCE_RECSPAWN (the seam) + a pid file the wrapper writes itself.
+ */
+process.env.DSH_SHOT_FORCE_RECSPAWN = '1'
+const viaSpawn = await shot.recordStart({ fps: 10, region: REGION, audio: false })
+if (viaSpawn.path) files.push(viaSpawn.path)
+check(
+	'fallback: recordStart really goes through ps/recspawn.ps1 (via:recspawn)',
+	viaSpawn.ok === true && viaSpawn.via === 'recspawn' && String(viaSpawn.path) !== '',
+	ascii({ ok: viaSpawn.ok, via: viaSpawn.via })
+)
+await sleep(600)
+const stateSpawn = (() => {
+	try {
+		return JSON.parse(fs.readFileSync(statePath, 'utf8'))
+	} catch {
+		return {}
+	}
+})()
+check(
+	'fallback: state names the REAL ffmpeg, not the PowerShell wrapper (pid>0, via:recspawn, same file)',
+	Number(stateSpawn.pid) > 0 && String(stateSpawn.via) === 'recspawn' && String(stateSpawn.file) === String(viaSpawn.path),
+	ascii({ hasPid: Number(stateSpawn.pid) > 0, via: stateSpawn.via, sameFile: String(stateSpawn.file) === String(viaSpawn.path) })
+)
+const pidName = await shot.run('tasklist', ['/FI', 'PID eq ' + Number(stateSpawn.pid), '/FO', 'CSV', '/NH'], { timeoutMs: 10_000 })
+check(
+	'fallback: that pid is alive and named ffmpeg.exe -- the exact judgement the reaper makes',
+	pidName.code === 0 && /ffmpeg/i.test(String(pidName.stdout)),
+	ascii(String(pidName.stdout).slice(0, 140))
+)
+const stopSpawn = await shot.recordStop()
+check(
+	'fallback: stop still finishes the mp4 (bytes>0) and clears the state',
+	stopSpawn.ok === true && stopSpawn.bytes > 0 && fs.existsSync(statePath) === false,
+	ascii({ ok: stopSpawn.ok, bytes: stopSpawn.bytes, stateLeft: fs.existsSync(statePath) })
+)
+delete process.env.DSH_SHOT_FORCE_RECSPAWN
+
 /* cleanup: three temp clips, and the red frame must be gone ---------------------- */
 for (const f of files) {
 	try {

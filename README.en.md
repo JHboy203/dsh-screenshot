@@ -194,6 +194,12 @@ Four things that are easy to overlook but each make this feature "look broken":
    nothing else on screen can indicate where the boundary is. The red frame is drawn **outside the capture rectangle**, so it never ends up in the video;
    internally it is **cut out with a window region** (the version using `TransparencyKey` measured zero pixels shown on screen).
    If the frame fails to come up, recording is unaffected.
+   ⚠️ **"Created later" does not mean "on top" (measured, R54)**: the frame is `WS_EX_NOACTIVATE`
+   (it must never take focus), so it can never become the foreground window — and a window that is
+   **both TopMost and foreground** paints above it regardless of creation order. Measured 2026-10-24:
+   the window existed, reported correct geometry and did paint, yet the capture found zero red pixels.
+   The fix is an explicit `SetWindowPos(HWND_TOPMOST, SWP_NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW)` in
+   `Shown` — top of the topmost band, without stealing focus and without touching the geometry.
 4. **The frame must be torn down when recording ends**: `record('stop')` writes the stop signal first and then kills the process; a leftover red frame is worse than not drawing one at all.
 
 ## Recording audio (R41)
@@ -318,8 +324,16 @@ removes it. **Before the next start** (and on a bare "stop" with nothing recordi
 pid **still `ffmpeg.exe`** — pids get reused, killing someone else's process is worse than leaving an
 orphan; (3) only then `taskkill /PID … /T /F` and delete the state file. A reply with
 `reapedPrev:true` means "the previous clip never finished and has been terminated". Limitation: only
-`via:'node'` (ffmpeg started directly) has a pid; under the sandbox `recspawn.ps1` starts it, so its
-`child.pid` is PowerShell — no state is written and nothing is guessed.
+**Both ways of starting ffmpeg are protected (R54)**: on the direct path (`via:'node'`) the pid is
+`child.pid`; when `ps/recspawn.ps1` starts it instead, `child.pid` is PowerShell — so the wrapper now
+writes the real ffmpeg pid into a pid file itself (`-PidFile`, `{"pid":N}`), the host reads it and
+stores it in `current.json` exactly as before. One reaper judgement, both paths.
+⚠️ That fallback only triggers when node's `spawn` dies with `EPERM`, and the host process is never
+sandboxed — i.e. **it never runs in production**. To avoid keeping a branch that looks alive but was
+never exercised, there is a test seam `DSH_SHOT_FORCE_RECSPAWN=1` (only the probe sets it); the
+`record-audio` probe grew 4 arms: it really takes the `recspawn` route, the state names the **real
+ffmpeg**, that pid is alive and actually called `ffmpeg.exe`, and stopping still leaves a playable mp4
+with the state cleared.
 
 ## Where posted wheel messages apply (measured in R32)
 
