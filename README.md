@@ -152,7 +152,8 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 项：录屏框在屏幕上的像素级证据（R53 起压在已知棋盘窗上；R55 起自己找干净子区 + 直接问"边框那一点归谁"）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 45 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already/孤儿录制清理/recspawn 退路与它的孤儿保护），约 55 秒
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 36 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 项：**录进文件的那块画面**（真录 2.5s → 抽帧 → 视频里 0 个红框像素、亮度差 ≤8%、两色都在），约 13 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -208,6 +209,14 @@ shot_bridge({action:'send', ops:[{op:'eval', js:"(()=>{const o=document.createEl
    而那块正是**要录进视频**的区域。探针现在会同时判"边框在"与"内部 100% 还是原来的颜色"，
    这两个一起绿才算过。
 4. **录完必须收掉框**：`record('stop')` 会先落停止信号再杀进程，残留一个红框比不画更糟。
+
+**交付物是文件，所以要判文件（R56）**：上面 3 的证据全在**屏幕**上 —— 边框在矩形外、内部没变，
+只能推出"应该没进视频"。`dev/record-integrity-probe.mjs` 把它落到文件：压一块已知棋盘 →
+真录 2.5 s → 用结果面板那条 `recAction('frame')` 抽一帧 → 判那一帧的像素：
+
+- 视频里**红框像素 = 0**（几何上"在矩形外"到底有没有 1 px 渗进来，只有这样才知道）；
+- 亮度与被录内容相差 **≤8%**（R55 那个 17% 压暗在屏幕上看不出来，在文件里就是整段）；
+- 两色都还在（H.264 有损，所以判"两色各占 30–70%"，不判逐像素相等）。
 
 ## 录屏录音（R41）
 

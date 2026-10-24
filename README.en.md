@@ -156,7 +156,8 @@ a maximized window back into a normal-sized one).
 
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint)
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 33 项：像素库/探针库自检（1 秒，确定性）
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 checks: **what lands in the file** (records 2.5 s, extracts a frame: 0 red pixels, brightness within 8 %, both tones present)
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -206,6 +207,16 @@ Four things that are easy to overlook but each make this feature "look broken":
    (`216,222,233` → `179,184,193`) — and that area is exactly what gets recorded. The probe now judges
    both "the border is there" and "the interior is still 100 % the original pixels".
 4. **The frame must be torn down when recording ends**: `record('stop')` writes the stop signal first and then kills the process; a leftover red frame is worse than not drawing one at all.
+
+**The deliverable is a FILE, so judge the file (R56)**: everything in item 3 is screen evidence —
+"the border sits outside the rect, the interior is untouched" only *implies* "it is not in the video".
+`dev/record-integrity-probe.mjs` settles it on the file: paint the known checkerboard, record 2.5 s,
+extract one frame through the very call the result panel uses (`recAction('frame')`), then judge:
+
+- **0 red pixels** in the video (only this answers whether a 1 px overlap ever leaks in);
+- brightness within **8 %** of the subject (the R55 17 % dim was invisible on screen, and would have
+  been the whole recording);
+- both tones still present (H.264 is lossy, so it asserts "each tone 30–70 %", never pixel equality).
 
 ## Recording audio (R41)
 
