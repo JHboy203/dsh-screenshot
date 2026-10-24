@@ -159,6 +159,12 @@ a maximized window back into a normal-sized one).
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 checks: **what lands in the file** (records 2.5 s, extracts a frame: 0 red pixels, brightness within 8 %, both tones present)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 81 checks: **the stitched long image itself** (numbered luma-band fixture; auto / manual / **scrollbar-visible** / **3840 px tall page** / **animated region** arms: band order / each exactly once / every band its own height / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — 166 s
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
+                args:['measure','10','8']})                                        # lab: geometry only (line height / band height / total / one notch / frames at one notch) — 7 s
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
+                args:['run','10','8','0','20']})                                   # lab: one auto session on a 3840 px page -> frames / stopReason / height / band runs / per-poll trajectory
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
+                args:['run','40','1','90','14']})                                  # lab: one auto session while a block inside the region repaints every 90 ms (the R61 case)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',

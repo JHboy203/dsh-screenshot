@@ -155,6 +155,12 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})      
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 45 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already/孤儿录制清理/recspawn 退路与它的孤儿保护），约 55 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 项：**录进文件的那块画面**（真录 2.5s → 抽帧 → 视频里 0 个红框像素、亮度差 ≤8%、两色都在），约 13 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 81 项：**长截图成品**（编号亮度色带夹具 → auto / manual / **滚动条可见** / **3840px 长页面** / **区域里有动画** 五条真实臂 → 色带顺序 / 每条恰好一次 / 每条高度 / 内容结束位置；外加"两帧不重叠必须报错"的反向臂），166 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
+                args:['measure','10','8']})                                        # 实验台：只量夹具几何（行高 / 带高 / 总高 / 一格位移 / 一帧一格要几帧），7 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
+                args:['run','10','8','0','20']})                                   # 实验台：3840px 长页面跑一次 auto，回帧数/停因/成品高/色带 run/逐拍轨迹
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
+                args:['run','40','1','90','14']})                                  # 实验台：区域里有东西每 90ms 重画时跑一次 auto（R61 那个场景）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # 排障用（不是探针、`dev/_*` 不入库）：跑一次会话并留下所有帧，逐对打印"真实位移 vs 拼接器报的偏移"
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
