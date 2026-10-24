@@ -158,7 +158,7 @@ a maximized window back into a normal-sized one).
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 checks: **what lands in the file** (records 2.5 s, extracts a frame: 0 red pixels, brightness within 8 %, both tones present)
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 32 checks: **the stitched long image itself** (numbered luma-band fixture, auto + manual arms: band order / each exactly once / every band 79 px / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — about 2 min
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 47 checks: **the stitched long image itself** (numbered luma-band fixture; auto / manual / **scrollbar-visible** arms: band order / each exactly once / every band 79 px / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — 133 s
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -429,8 +429,11 @@ Equivalent offline way: append the `insert` line from this repo's `cordis.patch.
   "the same picture" and skipped instead of contributing a duplicated strip.
 - After the coarse search on downscaled signatures, the offset is **refined at full resolution**: the coarse quantisation is ~4 px per signature pixel, which used to put every seam 2 px off
   (2 px of content duplicated or lost per seam). Seams now land on the pixel (the probe asserts every band is exactly 79 px).
-- A **self-moving scrollbar** inside the captured region changes that column between frames; it is the one known nuisance for this algorithm, so the probe fixture hides its scrollbar and judges
-  the stitcher alone.
+- Chrome that moves **on the region's edge** (a scrollbar thumb, a resize grip, an edge overlay) never agrees between frames, so the stitcher now **trims the outer edge on both passes**
+  (6 % of the width, clamped to 6..40 px) before searching (R59) — a visible scrollbar no longer matters. Measured: real R58 frames went from a refined residual of **0.20–0.22** (a blinking caret on
+  the left edge) to **0.00** with the same offsets; a synthetic four-frame case (14 px scrollbar on the right, thumb moving every frame) yields offsets **237/237/237**, exactly the ground truth.
+  Dynamic content **inside** the region (video, animations, a centred progress bar) is still a known nuisance — that is no longer "edge chrome" and must be argued from the content's own overlap.
+- The probe fixture hides its scrollbar by default; `-Scrollbar 1` keeps it, and the probe's fourth arm runs one auto session that way, so the paragraph above is not a claim on paper.
 - **The clipboard is an exclusive machine-wide resource**: if another program is holding it, copying a screenshot will fail (measured error: "the requested clipboard operation failed").
   The helper retries 4 times; if it still fails, **the client explicitly says "the copy did not succeed" and leaves diagnostics**; it will not pretend to have copied.
 - "Hide the DSH UI while capturing" finds the window by **title** (`DeepSeek Harness` substring match); if the window title is changed beyond

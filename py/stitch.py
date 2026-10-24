@@ -34,12 +34,41 @@ OVERLAP_MIN = 40
 DUP_TOL = 1.0
 # Best-overlap residual above this = "these frames do not overlap at all", not a bad match.
 MATCH_TOL = 8.0
+# Edge chrome (R59): a scrollbar THUMB, a resize grip or a fixed overlay sitting on the edge of
+# the captured region MOVES (or re-renders) between frames, so those columns never match -- and
+# the overlap search then fails or lands on a wrong offset. Measured on the R58 fixture with the
+# scrollbar visible: 131 of 283 rows differed even at the TRUE shift, and the coarse match picked
+# 475 px for a pair that truly moved 237 px. The signature therefore ignores the outer edge.
+MARGIN_FRAC = 0.06
+MARGIN_MIN = 6
+MARGIN_MAX = 40
+# ⚠️ Two "clever" robustifiers were tried here and BOTH are wrong -- do not rebuild them:
+#   ① trim the worst 10 % of PIXELS: on the luma-band fixture a 6 px wrong offset only mismatches
+#      the ~2 % of pixels near band boundaries, so the score read 0.00 at 230 px AND at 237 px;
+#      the argmin then returned the smallest offset of that plateau (231 px per seam, not 237).
+#   ② trim the worst 25 % of COLUMNS: same idea, and PIL cannot even give exact column means
+#      cheaply -- `resize((1, h), BOX)` at a 286:1 reduction SAMPLES instead of averaging (an
+#      all-zero diff with 7344 non-zero pixels reduces to 0), so the score silently went flat.
+# Keeping the plain mean over edge-trimmed columns is the version that stays sharp: measured
+# 0.00 at the true shift vs 0.36 at +3 px and 0.75 at -6 px on the synthetic case.
 
 
-def signature(path, scale_width):
-    """Grayscale, width-downscaled copy for the overlap search."""
+def margins(width):
+    """How many columns to ignore on each side of the captured region."""
+    m = int(round(width * MARGIN_FRAC))
+    m = max(MARGIN_MIN, min(MARGIN_MAX, m))
+    if width - 2 * m < 24:
+        m = max(0, (width - 24) // 2)
+    return m
+
+
+def signature(path, scale_width, margin=0):
+    """Grayscale, width-downscaled copy for the overlap search (edge columns dropped)."""
     im = Image.open(path).convert("L")
     w, h = im.size
+    if margin > 0 and w - 2 * margin >= 16:
+        im = im.crop((margin, 0, w - margin, h))
+        w = im.size[0]
     if w > scale_width:
         im = im.resize((scale_width, max(1, int(round(h * scale_width / float(w))))), Image.BILINEAR)
     return im
@@ -137,9 +166,16 @@ def main(argv):
 
     frames = [Image.open(f).convert("RGB") for f in files]
     width, height = frames[0].size
-    sigs = [signature(f, scale_width) for f in files]
+    # R59: ignore the outer edge on BOTH passes (coarse signature and full-resolution refine).
+    # A scrollbar thumb / resize grip / edge overlay moves between frames and would otherwise
+    # poison every candidate shift.
+    margin = margins(width)
+    sigs = [signature(f, scale_width, margin) for f in files]
     # Full-resolution grayscale copies, used only by the refinement pass.
-    loupe = [f.convert("L") for f in frames]
+    if margin > 0 and width - 2 * margin >= 16:
+        loupe = [f.convert("L").crop((margin, 0, width - margin, height)) for f in frames]
+    else:
+        loupe = [f.convert("L") for f in frames]
     ratio = float(height) / float(sigs[0].size[1]) if sigs[0].size[1] else 1.0
 
     # offsets[k] = 第 k+1 帧相对第 k 帧**上移了多少像素**（= find_shift 的约定，
@@ -224,6 +260,7 @@ def main(argv):
         "offsets": offsets,
         "scores": scores,
         "skipped": skipped,
+        "margin": margin,
     }))
     return 0
 

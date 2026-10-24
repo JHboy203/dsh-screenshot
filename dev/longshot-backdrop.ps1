@@ -44,6 +44,9 @@ param(
   [int]$FontPt = 40,
   [int]$Spaces = 120,
   [int]$Seconds = 180,
+  # 0 = hide the vertical scrollbar (clean content), 1 = keep it visible (the edge-chrome case
+  # the stitcher has to survive: its thumb moves between frames).
+  [int]$Scrollbar = 0,
   [string]$Log = '',
   [string]$Info = '',
   [string]$Control = ''
@@ -154,8 +157,11 @@ $rtb.ReadOnly = $true
 # frames, i.e. it is a real pixel difference that the overlap search has to ignore (measured
 # R58: with the scrollbar visible, only the colour runs to its left matched; 131 of 283 rows
 # differed). Real apps do have scrollbars, but this fixture exists to judge the STITCHER, so
-# the chrome that is not content must not be in the picture.
-try { $rtb.Handle | Out-Null; [void][DshLongBackdrop]::ShowScrollBar($rtb.Handle, 1, $false) } catch { Log @{ ok = $false; ev = 'hidescroll'; error = "$_" } }
+# the chrome that is not content must not be in the picture. -Scrollbar 1 keeps it visible on
+# purpose: that arm (R59) is about the stitcher surviving a thumb that moves between frames.
+if ($Scrollbar -eq 0) {
+  try { $rtb.Handle | Out-Null; [void][DshLongBackdrop]::ShowScrollBar($rtb.Handle, 1, $false) } catch { Log @{ ok = $false; ev = 'hidescroll'; error = "$_" } }
+}
 
 $script:wheelOn = @{}
 $script:lastLine = -1
@@ -209,6 +215,7 @@ $form.add_Shown({
       lineH = $lineH
       fontPt = $FontPt
       padChars = $lens[0]
+      scrollbar = $Scrollbar
     }
     if ($Info -ne '') {
       [System.IO.File]::WriteAllText($Info, ($payload | ConvertTo-Json -Compress -Depth 6), (New-Object System.Text.UTF8Encoding($false)))

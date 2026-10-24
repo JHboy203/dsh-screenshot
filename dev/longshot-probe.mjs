@@ -17,6 +17,10 @@
 //   ARM C (negative) jumps farther than one frame -> the stitcher must refuse with an error,
 //                  never emit a tall, plausible, wrong picture. (The first version of this probe
 //                  measured exactly that failure: +479px of duplicated content, silently.)
+//   ARM D (edge chrome) same auto session, but the fixture keeps its VERTICAL SCROLLBAR VISIBLE:
+//                  the thumb moves between frames, which is the one piece of content-free chrome
+//                  that used to break the overlap search (R58 measured 131/283 rows differing at
+//                  the true shift). Proves the edge/margin handling added in R59.
 //
 // HOW IT KNOWS THE RIGHT ANSWER: dev/longshot-backdrop.ps1 paints N numbered bands, each a
 // distinct colour, and reports its own per-band Y/height/colour in the Info JSON. So the probe
@@ -75,7 +79,7 @@ function check(item, ok, detail, kind) {
 
 let child = null
 let errFd = -1
-function startFixture() {
+function startFixture(scrollbar = 0) {
 	try { fs.rmSync(INFO, { force: true }) } catch {}
 	try { fs.rmSync(FLOG, { force: true }) } catch {}
 	try { fs.rmSync(CONTROL, { force: true }) } catch {}
@@ -86,6 +90,7 @@ function startFixture() {
 			'-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', BACKDROP,
 			'-X', String(FX), '-Y', String(FY), '-W', String(FW), '-H', String(FH),
 			'-Bands', String(BANDS), '-Seconds', String(SECONDS),
+			'-Scrollbar', String(scrollbar),
 			'-Log', FLOG, '-Info', INFO, '-Control', CONTROL,
 		],
 		{ windowsHide: false, stdio: ['ignore', errFd, errFd] }
@@ -311,7 +316,25 @@ try {
 	const cx = Math.round(info.x + info.w / 2)
 	const cy = Math.round(info.y + info.h / 2)
 	const hit = await shot.hitTest(cx, cy)
-	check('the window under the region centre is the fixture (not DSH, not another app)', Number(hit.hwnd) === Number(info.hwnd), `hit=${hit.hwnd} '${hit.title ?? ''}' want=${info.hwnd}`, Number(hit.hwnd) === Number(info.hwnd) ? undefined : 'env')
+	const mine = Number(hit.hwnd) === Number(info.hwnd)
+	check('the window under the region centre is the fixture (not DSH, not another app)', mine, `hit=${hit.hwnd} '${hit.title ?? ''}' want=${info.hwnd}`, mine ? undefined : 'env')
+	if (!mine) {
+		// Measured (R59): with the desktop LOCKED the lock screen owns every point, the wheel is
+		// posted to it, the fixture never scrolls -- and the run then burns 7 minutes printing a
+		// pile of FAILs that all say the same thing. Say it once, say it loudly, exit env=2.
+		console.log(
+			`   ABORT  the region is covered by hwnd ${hit.hwnd} '${hit.title ?? ''}'.\n` +
+			'          Locked screen / screensaver / another always-on-top window? Unlock and re-run.\n' +
+			'          (Every pixel verdict below would be about that window, not the stitcher.)'
+		)
+		writeControl('q')
+		await sleep(300)
+		try { if (child !== null) child.kill() } catch {}
+		try { if (errFd >= 0) fs.closeSync(errFd) } catch {}
+		try { await scroll.scrollCancel() } catch {}
+		console.log(`\nlongshot: aborted early (${results.filter((r) => r.ok).length} PASS so far) -- environment, not a product verdict`)
+		process.exit(2)
+	}
 
 	// ─────────── ARM A: auto ───────────
 	const a = await runArm('auto', 'auto', async () => await waitDone(DONE_TIMEOUT_MS))
@@ -371,6 +394,42 @@ try {
 
 	if (a !== null) cleanupPng(a.out.path)
 	if (b !== null) cleanupPng(b.out.path)
+
+	// ─────────── ARM D: a VISIBLE scrollbar (edge chrome) ───────────
+	// The stitcher's overlap search used to include the outer columns, and a scrollbar THUMB
+	// moves between frames: measured R58 -> at the true shift 131 of 283 rows still differed,
+	// and the coarse match picked 475 px for a pair that moved 237 px. R59 drops the edge from
+	// both passes and scores on the closest 90 % of pixels; this arm is what proves it, with
+	// the scrollbar VISIBLE instead of hidden.
+	console.log('\n--- ARM D: scrolling with a VISIBLE scrollbar (edge chrome) ---')
+	try { if (child !== null) child.kill() } catch {}
+	await sleep(600)
+	startFixture(1)
+	const infoD = await waitInfo(20000)
+	check(
+		'fixture restarted with its scrollbar visible',
+		infoD !== null && Number(infoD.scrollbar) === 1,
+		infoD === null ? 'no Info file' : `scrollbar=${infoD.scrollbar}`
+	)
+	if (infoD !== null) {
+		const hitD = await shot.hitTest(Math.round(infoD.x + infoD.w / 2), Math.round(infoD.y + infoD.h / 2))
+		const mineD = Number(hitD.hwnd) === Number(infoD.hwnd)
+		check(
+			'the fixture is still the window under the region centre',
+			mineD,
+			`hit=${hitD.hwnd} '${hitD.title ?? ''}' want=${infoD.hwnd}`,
+			mineD ? undefined : 'env'
+		)
+		if (!mineD) {
+			console.log('   SKIP   scrolling-with-scrollbar arm: something else is on top of the region')
+		} else {
+			const d = await runArm('scrollbar', 'auto', async () => await waitDone(DONE_TIMEOUT_MS))
+			if (d !== null) {
+				verify('scrollbar', d.out, infoD, BANDS, FH)
+				cleanupPng(d.out.path)
+			}
+		}
+	}
 } catch (error) {
 	console.log(`   FAIL  probe crashed: ${String(error?.message ?? error)}`)
 	results.push({ item: 'probe crashed', ok: false })
