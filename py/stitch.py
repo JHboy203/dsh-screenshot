@@ -13,7 +13,11 @@ Speed note
     ImageChops.difference + histogram (both C loops) instead of pixel loops in
     Python: ~400 candidate shifts cost a fraction of a second. No numpy needed.
 
-Prints one JSON line: {"width":W,"height":H,"frames":N,"offsets":[...]}
+Prints one JSON line: {"width":W,"height":H,"frames":N,"offsets":[...],"scores":[...],"skipped":N}
+On a frame pair that does NOT overlap it prints an error JSON line to stderr and exits 3 --
+it must never emit a plausible-looking wrong picture (R58 measured exactly that: +479 px of
+duplicated content, silently, from frames that never overlapped).
+
 ASCII only (console is GBK).
 """
 from __future__ import annotations
@@ -25,6 +29,11 @@ from PIL import Image, ImageChops
 
 SCALE_WIDTH = 160
 OVERLAP_MIN = 40
+# Two frames this similar are the SAME picture: a blinking caret, a ticking clock, a cursor.
+# Measured on the R58 fixture: an identical frame pair scores 0.00, a real scroll scores > 20.
+DUP_TOL = 1.0
+# Best-overlap residual above this = "these frames do not overlap at all", not a bad match.
+MATCH_TOL = 8.0
 
 
 def signature(path, scale_width):
@@ -50,20 +59,55 @@ def mean_abs_diff(a, b):
 
 
 def find_shift(prev, cur, overlap_min):
-    """How far the content moved up between two frames (in downscaled pixels)."""
+    """How far the content moved up between two frames (downscaled px) + the residual.
+
+    Returns (shift, score). `score` is the mean abs difference of the best overlap: a real
+    overlap scores near 0, a pair with no overlap scores high -- that is what lets the caller
+    tell "found it" from "guessed something".
+    """
     w, h = prev.size
     best = None
-    for s in range(overlap_min, max(overlap_min + 1, h - 8)):
+    best_score = None
+    for s in range(max(2, overlap_min), max(3, h - 1)):
         a = prev.crop((0, s, w, h))
         b = cur.crop((0, 0, w, h - s))
         if a.size[1] < 8:
             break
         score = mean_abs_diff(a, b)
-        if best is None or score < best[1]:
-            best = (s, score)
+        if best_score is None or score < best_score:
+            best = s
+            best_score = score
     if best is None:
-        return h
-    return best[0]
+        return h, float("inf")
+    return best, float(best_score)
+
+
+def refine_shift(prev_l, cur_l, guess, radius):
+    """Refine a downscaled estimate at FULL resolution (R58).
+
+    The signature is width-downscaled, so one downscaled pixel is `ratio` real pixels (~4.1 for
+    a 660 px wide region): a coarse match of 57 downscaled pixels rounds to 235 real pixels when
+    the true shift is 237. That is a 2 px wrong seam per frame -- invisible on screen, but it
+    duplicates/drops 2 px of content per seam and it makes "exact" assertions impossible. One
+    full-resolution pass inside +-radius of the coarse guess costs ~10 crops and removes it.
+    """
+    w, h = prev_l.size
+    best = None
+    best_score = None
+    lo = max(2, int(guess) - int(radius))
+    hi = min(h - 1, int(guess) + int(radius))
+    for s in range(lo, hi + 1):
+        a = prev_l.crop((0, s, w, h))
+        b = cur_l.crop((0, 0, w, h - s))
+        if a.size[1] < 8:
+            continue
+        score = mean_abs_diff(a, b)
+        if best_score is None or score < best_score:
+            best = s
+            best_score = score
+    if best is None:
+        return int(guess), float("inf")
+    return best, float(best_score)
 
 
 def main(argv):
@@ -94,6 +138,8 @@ def main(argv):
     frames = [Image.open(f).convert("RGB") for f in files]
     width, height = frames[0].size
     sigs = [signature(f, scale_width) for f in files]
+    # Full-resolution grayscale copies, used only by the refinement pass.
+    loupe = [f.convert("L") for f in frames]
     ratio = float(height) / float(sigs[0].size[1]) if sigs[0].size[1] else 1.0
 
     # offsets[k] = 第 k+1 帧相对第 k 帧**上移了多少像素**（= find_shift 的约定，
@@ -104,11 +150,59 @@ def main(argv):
     #    中间多出一条重复带。400x300、滚动 120 的三帧拼出来是 660（应为 540）。
     #    合成用例见 .tmp-vision/mkstitch.py + .tools/dsh-stitch-check.py。
     offsets = []
+    scores = []
+    skipped = 0
+    smin = max(4, int(round(overlap_min / ratio)))
     for k in range(1, len(frames)):
-        s_small = find_shift(sigs[k - 1], sigs[k], max(4, int(round(overlap_min / ratio))))
-        s = int(round(s_small * ratio))
+        prev_sig, cur_sig = sigs[k - 1], sigs[k]
+        same = mean_abs_diff(prev_sig, cur_sig)
+        if same <= DUP_TOL:
+            # Same picture (caret blink / clock / cursor): it carries NO new rows. Appending
+            # anything for it duplicates content, and inventing a shift for it is exactly how
+            # R58 measured +479 px of extra height on a picture that looked plausible.
+            offsets.append(0)
+            scores.append(round(same, 2))
+            skipped += 1
+            continue
+        s_small, score = find_shift(prev_sig, cur_sig, smin)
+        # A best-in-range shift is NOT evidence of an overlap: when the content jumped farther
+        # than one frame there is nothing to match and the minimiser still returns something.
+        # The residual is what separates "found the seam" (near 0) from "guessed" (high).
+        if score > MATCH_TOL:
+            print(
+                "stitch: frames %d and %d do not overlap (best match residual %.2f > %.2f). "
+                "The content scrolled farther than one frame height between the two captures; "
+                "scroll in smaller steps and retry." % (k, k + 1, score, MATCH_TOL),
+                file=sys.stderr,
+            )
+            print(json.dumps({
+                "error": "no-overlap",
+                "frame": k + 1,
+                "frames": len(frames),
+                "score": round(score, 2),
+                "tolerance": MATCH_TOL,
+            }), file=sys.stderr)
+            return 3
+        guess = int(round(s_small * ratio))
+        s, precise = refine_shift(loupe[k - 1], loupe[k], guess, int(round(ratio)) + 2)
+        if precise > MATCH_TOL:
+            print(
+                "stitch: frames %d and %d do not overlap at full resolution "
+                "(residual %.2f > %.2f around a %d px guess)."
+                % (k, k + 1, precise, MATCH_TOL, guess),
+                file=sys.stderr,
+            )
+            print(json.dumps({
+                "error": "no-overlap",
+                "frame": k + 1,
+                "frames": len(frames),
+                "score": round(precise, 2),
+                "tolerance": MATCH_TOL,
+            }), file=sys.stderr)
+            return 3
         s = max(1, min(height - 1, s))
         offsets.append(s)
+        scores.append(round(precise, 2))
 
     total = height + sum(offsets)
     canvas = Image.new("RGB", (width, total))
@@ -116,12 +210,21 @@ def main(argv):
     canvas.paste(frames[0], (0, 0))
     y += height
     for k, s in enumerate(offsets):
+        if s <= 0:
+            continue
         part = frames[k + 1].crop((0, height - s, width, height))
         canvas.paste(part, (0, y))
         y += s
 
     canvas.save(out)
-    print(json.dumps({"width": width, "height": total, "frames": len(frames), "offsets": offsets}))
+    print(json.dumps({
+        "width": width,
+        "height": total,
+        "frames": len(frames),
+        "offsets": offsets,
+        "scores": scores,
+        "skipped": skipped,
+    }))
     return 0
 
 

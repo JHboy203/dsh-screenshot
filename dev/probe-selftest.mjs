@@ -94,14 +94,15 @@ check('meanLuma 与手算一致（±0.5）', Math.abs(luma - want) < 0.5, `${lum
 
 /* ─────────────────── lib/probes.mjs ─────────────────── */
 // 显式探针表是**契约**：增删条目都要在这里改一行，别让"少了一个探针"静默通过。
-// R41 加 record-audio（录屏录音）、R56 加 record-integrity（判文件而不是判屏幕）。
+// R41 加 record-audio（录屏录音）、R56 加 record-integrity（判文件而不是判屏幕）、
+// R58 加 longshot（长截图的成品，像素级）。
 // 断言比"数量相等"更强一点：名字集合逐项对上。
-const wantProbes = ['hosttest', 'recframe', 'record-audio', 'record-integrity', 'wheel-target', 'hide-self', 'wheel-app-qt', 'wheel-app-java']
+const wantProbes = ['hosttest', 'recframe', 'record-audio', 'record-integrity', 'longshot', 'wheel-target', 'hide-self', 'wheel-app-qt', 'wheel-app-java']
 const gotProbes = Object.keys(PROBES)
 const missingProbes = wantProbes.filter((n) => !gotProbes.includes(n))
 const extraProbes = gotProbes.filter((n) => !wantProbes.includes(n))
 check(
-	'探针表里有 8 个（hosttest / recframe / record-audio / record-integrity / wheel-target / hide-self / wheel-app-qt / wheel-app-java）',
+	'探针表里有 9 个（hosttest / recframe / record-audio / record-integrity / longshot / wheel-target / hide-self / wheel-app-qt / wheel-app-java）',
 	missingProbes.length === 0 && extraProbes.length === 0,
 	gotProbes.join(','),
 )

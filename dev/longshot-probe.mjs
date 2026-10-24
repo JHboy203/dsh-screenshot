@@ -1,0 +1,389 @@
+// dev/longshot-probe.mjs -- R58: the long capture's OUTPUT, asserted from pixels.
+//
+// WHY THIS EXISTS: every probe we had stopped short of the product. `wheel-target` proves a
+// posted WM_MOUSEWHEEL is accepted by a real app; `recframe`/`record-integrity` prove the
+// recording frame and the encoded video. But the long screenshot -- the one feature whose whole
+// point is a STITCHED picture -- had no automated assertion about that picture. A stitcher that
+// repeats a frame, drops a frame, or seams at the wrong offset yields a plausible, tall, wrong
+// image; "frames: 4, height: 1832" reads exactly the same as a correct run.
+//
+// WHAT IT PROVES (two arms, same fixture):
+//   ARM A (auto)   the session drives the target itself: begin -> wheel posted to the leaf ->
+//                  frames accumulate -> end -> the stitched PNG contains bands 1..N in order,
+//                  each exactly once, seams uniform, height matching the known content height.
+//   ARM B (manual) the DEFAULT mode: the session polls, fingerprints, waits for stability and
+//                  commits only changed frames while an external actor scrolls the content to
+//                  known offsets. Same pixel assertions on the result.
+//   ARM C (negative) jumps farther than one frame -> the stitcher must refuse with an error,
+//                  never emit a tall, plausible, wrong picture. (The first version of this probe
+//                  measured exactly that failure: +479px of duplicated content, silently.)
+//
+// HOW IT KNOWS THE RIGHT ANSWER: dev/longshot-backdrop.ps1 paints N numbered bands, each a
+// distinct colour, and reports its own per-band Y/height/colour in the Info JSON. So the probe
+// can fold the stitched image into colour runs and name them: "row 0..63 = band 1, 64..127 =
+// band 2, ...". Reading the bands back is the only check that can fail when the picture is wrong
+// but the bookkeeping is right.
+//
+// MUST RUN FROM THE HOST (a window created in the sandboxed shell never reaches the interactive
+// desktop, and posting to a medium-integrity app is refused):
+//   host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})
+//   shot_probe({probe:'longshot'})
+//
+// EXIT CODES (same convention as the other probes): 0 all green | 1 a real regression |
+// 2 environment blocked it (fixture covered, wheel refused by the app) -- never read 2 as green.
+import fs from 'node:fs'
+import path from 'node:path'
+import { spawn } from 'node:child_process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN = path.dirname(HERE)
+const LAB = path.join('D:\\信息库\\AI工作区', '.tmp-shot-lab', 'longshot')
+const BACKDROP = path.join(HERE, 'longshot-backdrop.ps1')
+const INFO = path.join(LAB, 'fixture-info.json')
+const FLOG = path.join(LAB, 'fixture.log')
+const CONTROL = path.join(LAB, 'fixture-control.txt')
+const ERRLOG = path.join(LAB, 'fixture-stderr.log')
+
+/** The fixture's geometry. Big enough that 24 bands need >= 3 screens: more than one seam. */
+const FX = 560
+const FY = 120
+const FW = 660
+const FH = 520
+const BANDS = 24
+const SECONDS = 200
+
+fs.mkdirSync(LAB, { recursive: true })
+// Redirect BOTH the frame cache and the shots dir before anything imports them: the stitched
+// result must not land in the user's real screenshot folder.
+process.env.DSH_SHOT_CACHE = path.join(LAB, 'cache')
+
+const shot = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'shot.mjs')).href)
+const scroll = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'scrollsession.mjs')).href)
+const { readPng } = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'pixels.mjs')).href)
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const results = []
+let envFails = 0
+function check(item, ok, detail, kind) {
+	results.push({ item, ok: ok === true, env: kind === 'env' })
+	if (kind === 'env' && ok !== true) envFails += 1
+	console.log(`   ${ok ? 'PASS' : 'FAIL'}  ${item}  ${detail}`)
+}
+
+/* ─────────────────── fixture ─────────────────── */
+
+let child = null
+let errFd = -1
+function startFixture() {
+	try { fs.rmSync(INFO, { force: true }) } catch {}
+	try { fs.rmSync(FLOG, { force: true }) } catch {}
+	try { fs.rmSync(CONTROL, { force: true }) } catch {}
+	errFd = fs.openSync(ERRLOG, 'w')
+	child = spawn(
+		shot.findPowershell(),
+		[
+			'-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', BACKDROP,
+			'-X', String(FX), '-Y', String(FY), '-W', String(FW), '-H', String(FH),
+			'-Bands', String(BANDS), '-Seconds', String(SECONDS),
+			'-Log', FLOG, '-Info', INFO, '-Control', CONTROL,
+		],
+		{ windowsHide: false, stdio: ['ignore', errFd, errFd] }
+	)
+}
+
+function fixtureLog() {
+	try {
+		return fs.readFileSync(FLOG, 'utf8').split(/\r?\n/).filter((l) => l.trim() !== '').map((l) => {
+			try { return JSON.parse(l) } catch { return { ev: 'unparsed', raw: l } }
+		})
+	} catch { return [] }
+}
+
+function fixtureEventsAfter(n) {
+	return fixtureLog().slice(n)
+}
+
+function scrollLines(events) {
+	return events.filter((e) => e.ev === 'line').map((e) => Number(e.v))
+}
+
+/** Last first-visible-line the fixture reported (its own ground truth for scroll position). */
+function lastVisibleLine() {
+	const lines = scrollLines(fixtureLog())
+	return lines.length === 0 ? null : lines[lines.length - 1]
+}
+
+function writeControl(text) {
+	try { fs.writeFileSync(CONTROL, text, 'utf8') } catch {}
+}
+
+async function waitInfo(ms) {
+	const t0 = Date.now()
+	while (Date.now() - t0 < ms) {
+		if (fs.existsSync(INFO)) {
+			try {
+				const j = JSON.parse(fs.readFileSync(INFO, 'utf8'))
+				if (j && j.ok === true) return j
+			} catch {}
+		}
+		if (child !== null && child.exitCode !== null) return null
+		await sleep(150)
+	}
+	return null
+}
+
+/* ─────────────────── pixel reading ─────────────────── */
+
+/**
+ * Fold the stitched image into colour runs.
+ *
+ * The sample column is deliberately NOT the centre: the band label ("BAND 07") sits on the
+ * left, and text anti-aliasing would make single rows unmatchable. The right-hand part of every
+ * band is solid padding spaces, i.e. exactly one palette colour.
+ */
+function bandRuns(img, bands, column) {
+	const pal = bands.map((b) => ({ i: Number(b.i), rgb: b.rgb.map(Number) }))
+	const rows = []
+	for (let y = 0; y < img.height; y++) {
+		const c = img.at(column, y)
+		let best = null
+		let bestD = Infinity
+		for (const p of pal) {
+			const d = Math.abs(c[0] - p.rgb[0]) + Math.abs(c[1] - p.rgb[1]) + Math.abs(c[2] - p.rgb[2])
+			if (d < bestD) { bestD = d; best = p }
+		}
+		rows.push(bestD <= 24 ? best.i : null)
+	}
+	const runs = []
+	let cur = null
+	for (let k = 0; k < rows.length; k++) {
+		const v = rows[k]
+		if (cur !== null && cur.band === v) {
+			cur.n += 1
+			cur.y1 = k
+			continue
+		}
+		cur = { band: v, n: 1, y0: k, y1: k }
+		runs.push(cur)
+	}
+	// A run shorter than 3 rows is a colour boundary artifact, not a band.
+	const cleaned = runs.filter((r) => r.band !== null && r.n >= 3)
+	const seq = []
+	for (const r of cleaned) {
+		if (seq.length === 0 || seq[seq.length - 1].band !== r.band) seq.push(r)
+	}
+	let lastBandRow = -1
+	for (let y = rows.length - 1; y >= 0; y--) {
+		if (rows[y] !== null) { lastBandRow = y; break }
+	}
+	let unknownMiddle = 0
+	for (let y = 0; y <= lastBandRow; y++) if (rows[y] === null) unknownMiddle += 1
+	const trailing = rows.length - (lastBandRow + 1)
+	return { seq, cleaned, unknownMiddle, trailing, lastBandRow, rows }
+}
+
+/* ─────────────────── one arm's pixel verdict ─────────────────── */
+
+function verify(name, out, info, bandCount, frameH) {
+	console.log(`\n   [${name}] stitched: ${out.path}  (${out.width}x${out.height}, frames=${out.frames}, stopReason='${out.stopReason}')`)
+	const img = readPng(out.path)
+	const column = Math.max(20, Math.min(img.width - 20, Math.round(img.width * 0.62)))
+	const { seq, cleaned, unknownMiddle, trailing, lastBandRow } = bandRuns(img, info.bands, column)
+	const order = seq.map((r) => r.band)
+	const distinct = [...new Set(order)]
+	const stepAllPlusOne = order.length > 1 && order.every((b, k) => k === 0 || b === order[k - 1] + 1)
+	const heights = cleaned.map((r) => r.y1 - r.y0 + 1)
+	const lineH = Number(info.lineH) || 0
+	const tol = Math.max(3, Math.round(lineH * 0.06))
+	const heightOk = heights.every((h) => Math.abs(h - (Number(info.bands[0].h) || lineH)) <= tol)
+	const maxH = heights.length > 0 ? Math.max(...heights) : 0
+	const minH = heights.length > 0 ? Math.min(...heights) : 0
+
+	check(`${name}: result exists and is mentioned in the response`, fs.existsSync(out.path) === true && out.id !== '', `id=${out.id}`)
+	check(
+		`${name}: the picture is the REGION width (nothing rescaled)`,
+		Math.abs(img.width - FW) <= 1,
+		`img=${img.width} region=${FW}`
+	)
+	check(
+		`${name}: bands read back in order, each exactly once`,
+		stepAllPlusOne && distinct.length === bandCount && order[0] === 1 && order[order.length - 1] === bandCount,
+		`order=${order.slice(0, 8).join(',')}${order.length > 8 ? ',…' : ''} n=${order.length} distinct=${distinct.length}/${bandCount}`
+	)
+	check(
+		`${name}: no duplicated / backtracked band (the classic seam bug)`,
+		new Set(order).size === order.length && order.every((b, k) => k === 0 || b > order[k - 1]),
+		`seen=${distinct.length}`
+	)
+	check(
+		`${name}: every band is exactly its own height (seams land on the pixel, +-${tol}px)`,
+		heightOk,
+		`min=${minH} max=${maxH} band=${info.bands[0].h} runs=${cleaned.length}`
+	)
+	check(
+		`${name}: no unknown rows in the middle of the picture`,
+		unknownMiddle === 0,
+		`unknown middle rows=${unknownMiddle} of ${img.height}`
+	)
+	check(
+		`${name}: trailing blank is at most one frame (the region can scroll past the end)`,
+		trailing <= frameH,
+		`trailing=${trailing} frameH=${frameH}`
+	)
+	const expected = Number(info.totalH) || 0
+	const contentEnd = lastBandRow + 1
+	check(
+		`${name}: the content ends where it really ends (no lost or doubled rows)`,
+		expected > 0 && Math.abs(contentEnd - expected) <= 2,
+		`contentEnd=${contentEnd} expected=${expected}`
+	)
+	return { img, order, distinct }
+}
+
+/* ─────────────────── run ─────────────────── */
+
+const DONE_TIMEOUT_MS = 90000
+
+async function waitDone(maxMs) {
+	const t0 = Date.now()
+	let last = null
+	while (Date.now() - t0 < maxMs) {
+		last = await scroll.scrollStatus()
+		if (last.done === true) return last
+		await sleep(250)
+	}
+	return last
+}
+
+async function runArm(name, mode, drive) {
+	console.log(`\n--- ARM ${name} ---`)
+	const marks = fixtureLog().length
+	const begin = await scroll.scrollBegin(`${FX},${FY},${FW},${FH}`, { mode, maxFrames: 14, settleMs: 320 })
+	check(`${name}: begin accepted and claimed a target`, begin.ok === true && Number(begin.target) > 0, `target=${begin.target} '${begin.targetTitle ?? ''}' error='${begin.error ?? ''}'`)
+	if (begin.ok !== true) return null
+	if (typeof begin.active !== 'boolean') check(`${name}: begin reports active (client gates on it)`, false, 'missing field')
+	const t0 = Date.now()
+	const st = await drive()
+	const stFinal = st && st.done === true ? st : await waitDone(DONE_TIMEOUT_MS)
+	const lines = scrollLines(fixtureEventsAfter(marks))
+	const advanced = lines.length > 0 && Math.max(...lines) > Math.min(...lines)
+	check(
+		`${name}: frames accumulated`, Number(stFinal?.frames) >= 3,
+		`frames=${stFinal?.frames} elapsed=${((Date.now() - t0) / 1000).toFixed(1)}s wheelMode=${stFinal?.wheelMode} postedTo=${stFinal?.wheelPostedTo}`
+	)
+	check(
+		`${name}: the fixture really scrolled (ground truth from its own control)`,
+		advanced,
+		`line events=${lines.length} range=${lines.length === 0 ? 'none' : `${Math.min(...lines)}..${Math.max(...lines)}`}`,
+		advanced ? undefined : 'env'
+	)
+	const out = await scroll.scrollEnd()
+	check(`${name}: end returned a stitched file`, out.ok === true && fs.existsSync(out.path) === true, `error='${out.error ?? ''}'`)
+	if (out.ok !== true) return null
+	const frameH = Number(stFinal?.height) || FH
+	check(`${name}: the stitch is taller than one frame (it really stitched)`, out.height > frameH * 1.6, `h=${out.height} frameH=${frameH}`)
+	return { out, stFinal }
+}
+
+function cleanupPng(p) {
+	if (process.env.DSH_SHOT_KEEP === '1') return
+	try { fs.rmSync(p, { force: true }) } catch {}
+}
+
+let info = null
+let code = 0
+try {
+	startFixture()
+	info = await waitInfo(20000)
+	check('fixture window came up on the interactive desktop', info !== null, info === null ? 'no Info file (see fixture-stderr.log)' : `hwnd=${info.hwnd} rect=${info.x},${info.y},${info.w}x${info.h}`)
+	if (info === null) throw new Error('fixture did not start')
+
+	// The region must be fully on screen, otherwise the capture clips and the pixel verdict is
+	// about the desktop, not about the stitcher.
+	const disp = await shot.displays()
+	const vw = Number(disp.virtual?.w) || 1920
+	const vh = Number(disp.virtual?.h) || 1080
+	check('fixture region is inside the virtual screen', info.x >= 0 && info.y >= 0 && info.x + info.w <= vw && info.y + info.h <= vh, `rect=${info.x},${info.y},${info.w}x${info.h} screen=${vw}x${vh}`, 'env')
+
+	// Ownership: the session claims whatever top-level window owns the region centre. If that is
+	// not our fixture, every later comparison is about some other window.
+	const cx = Math.round(info.x + info.w / 2)
+	const cy = Math.round(info.y + info.h / 2)
+	const hit = await shot.hitTest(cx, cy)
+	check('the window under the region centre is the fixture (not DSH, not another app)', Number(hit.hwnd) === Number(info.hwnd), `hit=${hit.hwnd} '${hit.title ?? ''}' want=${info.hwnd}`, Number(hit.hwnd) === Number(info.hwnd) ? undefined : 'env')
+
+	// ─────────── ARM A: auto ───────────
+	const a = await runArm('auto', 'auto', async () => await waitDone(DONE_TIMEOUT_MS))
+	if (a !== null) verify('auto', a.out, info, BANDS, FH)
+
+	// ─────────── ARM B: manual (the default mode) ───────────
+	console.log('\n--- ARM manual ---')
+	writeControl('top')
+	await sleep(500)
+	const steps = [0, 5, 10, 15, 19, 23]
+	const b = await runArm('manual', 'manual', async () => {
+		let st = await scroll.scrollStatus()
+		for (const at of steps) {
+			if (st.done === true) break
+			writeControl(`scrollto ${at}`)
+			// settleMs is 320: one change + two stable grabs take ~1s. Give it 1.4s.
+			await sleep(1400)
+			st = await scroll.scrollStatus()
+			console.log(`      scrollto ${at} -> frames=${st.frames} h=${st.height} stalled=${st.stalled}`)
+		}
+		return st
+	})
+	if (b !== null) verify('manual', b.out, info, BANDS, FH)
+
+	// ─────────── ARM C (negative): too far to overlap must FAIL LOUDLY ───────────
+	// The first version of the stitcher searched for "the best overlap" and used it even when
+	// there was none: the result was a tall, plausible, WRONG picture (this probe measured
+	// +479px of duplicated content). So the honest-failure contract is part of the feature and
+	// gets its own arm: jump farther than one frame height and the session must refuse.
+	console.log('\n--- ARM C (negative): jump farther than one frame ---')
+	writeControl('top')
+	await sleep(1200)
+	const lineBefore = lastVisibleLine()
+	const beginC = await scroll.scrollBegin(`${FX},${FY},${FW},${FH}`, { mode: 'manual', maxFrames: 6, settleMs: 300 })
+	if (beginC.ok === true) {
+		await sleep(700)
+		writeControl(`scrollto ${BANDS - 1}`)
+		await sleep(1600)
+		const stC = await scroll.scrollStatus()
+		const lineAfter = lastVisibleLine()
+		const moved = lineBefore !== null && lineAfter !== null && lineAfter !== lineBefore
+		check(
+			'negative: the two frames really do not overlap (fixture jumped)',
+			Number(stC.frames) >= 2 && moved,
+			`frames=${stC.frames} line ${lineBefore} -> ${lineAfter}`,
+			moved ? undefined : 'env'
+		)
+		const outC = await scroll.scrollEnd()
+		check(
+			'negative: says so instead of stitching a wrong picture',
+			outC.ok === false && /overlap/i.test(String(outC.error ?? '')),
+			`ok=${outC.ok} error='${outC.error ?? ''}'`
+		)
+		check('negative: produced no file', outC.ok === false && String(outC.path ?? '') === '', `path='${outC.path ?? ''}'`)
+		await scroll.scrollCancel()
+	}
+
+	if (a !== null) cleanupPng(a.out.path)
+	if (b !== null) cleanupPng(b.out.path)
+} catch (error) {
+	console.log(`   FAIL  probe crashed: ${String(error?.message ?? error)}`)
+	results.push({ item: 'probe crashed', ok: false })
+} finally {
+	writeControl('q')
+	await sleep(400)
+	try { if (child !== null) child.kill() } catch {}
+	try { if (errFd >= 0) fs.closeSync(errFd) } catch {}
+	try { await scroll.scrollCancel() } catch {}
+}
+
+const pass = results.filter((r) => r.ok).length
+const realFail = results.filter((r) => r.ok !== true && r.env !== true).length
+const fail = results.length - pass
+console.log(`\nlongshot: ${pass} PASS / ${fail} FAIL${envFails > 0 ? ` (${envFails} env-blocked)` : ''}  (lab: ${LAB})`)
+process.exit(realFail > 0 ? 1 : envFails > 0 ? 2 : 0)

@@ -13,7 +13,7 @@ QQ 同款截图，按钮挂在**对话输入框「语音」键旁边**（`conver
 | ⏺ 录屏 | ffmpeg gdigrab 录制（H.264 + faststart）。**默认先框一块再录**（见下），屏幕上有一圈红框标出边界，右上角计时胶囊点「停止」收尾。菜单里可开**录音**（R41，默认关） |
 | Aa 提取文字 | 框选后**离线 OCR**（Windows 自带引擎，不出本机），出可复制/可贴进输入框的文本面板 |
 | 译 屏幕翻译 | OCR 之后把文字（带翻译指令前缀）贴进输入框，交给 DSH 自己的模型翻 |
-| ⇕ 长截图 | 框选区域 → 宿主滚一屏抓一张 → 重叠区对齐拼接 → 长图回到标注界面 |
+| ⇕ 长截图 | 框选区域 → 宿主逐格滚轮、滚一格抓一张 → 重叠区对齐拼接（不重叠就报错，不猜） → 长图回到标注界面 |
 | ☐ 截图时隐藏 DSH 界面 | 原生覆盖层在**冻结桌面之前**把 DSH 窗口藏起来（QQ 同款），框完/取消后还原并回到前台；默认关，在「更多设置」里勾 |
 
 > **R33 起删掉了「范围 / 选一个窗口来截 / 自己框范围 / 抓窗方式」四项**，以及在 DSH 窗口里
@@ -154,6 +154,8 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 项：录屏框在屏幕上的像素级证据（R53 起压在已知棋盘窗上；R55 起自己找干净子区 + 直接问"边框那一点归谁"）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 45 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already/孤儿录制清理/recspawn 退路与它的孤儿保护），约 55 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 项：**录进文件的那块画面**（真录 2.5s → 抽帧 → 视频里 0 个红框像素、亮度差 ≤8%、两色都在），约 13 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 32 项：**长截图成品**（编号亮度色带夹具 → auto 与 manual 各拼一张 → 色带顺序 / 每条恰好一次 / 每条高度 79px / 内容结束位置；外加"两帧不重叠必须报错"的反向臂），约 2 分钟
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # 排障用（不是探针、`dev/_*` 不入库）：跑一次会话并留下所有帧，逐对打印"真实位移 vs 拼接器报的偏移"
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -405,6 +407,17 @@ dsh plugin --profile desktop add <本目录或包名>
   **点位下面那个控件**：投给顶层窗口时 Chromium 认、**WinForms 等旧式应用不认**
   （实测：顶层窗体只触发自己的 MouseWheel，内容不滚；投给 `WindowFromPoint` 的叶子才滚）。
   不认时自动降级成移光标。Qt / Java / Electron 的自绘滚动容器**尚未逐个实测**。
+- 长截图**一次滚一格滚轮，不是滚"一屏的 80%"**（R58 改的）。滚轮的 `delta` 单位是 1/120 格，
+  应用再按自己的行高翻（WinForms 默认 3 行/格）：以前按像素发（520px 区域 → `-416`），
+  被读成 3.5 格 ≈ 10 行，**一次滚掉 811px，比一屏还高** —— 两帧之间没有重叠，拼接器只能猜。
+  现在按格发（`DSH_SHOT_WHEEL_NOTCHES=1..3` 可调，默认 1）；一格的位移由目标应用决定。
+- 拼接器**不接受"没有重叠的两帧"**：残差超过阈值就报错并保留会话（"滚得太多了，分两次滚"），
+  **不会**再静默拼出一张又高又像真的错图（R58 用探针量到过 +479px 的静默重复内容）。
+  只差几个像素的重复帧（光标闪烁、时钟跳秒）会被识别成"同一张画面"直接跳过，不再塞进一段重复内容。
+- 拼接偏移在缩小图上粗搜之后，再做一次**全分辨率精修**：粗搜的量化误差是 ~4px/像素，
+  以前每条接缝会因此偏 2px（重复/丢掉 2px 内容），现在缝落在像素上（探针断言每条色带 79px）。
+- 长截图的区域里如果有**会自己动的滚动条**，那一列像素在帧间变化，是这个算法唯一的已知干扰项；
+  夹具（`dev/longshot-backdrop.ps1`）因此把滚动条藏掉，专门判拼接本身。
 - **剪贴板是全机独占资源**：别的程序正占着时截图复制会失败（实测报「所请求的剪贴板操作失败」）。
   助手会重试 4 次；仍失败时**客户端会明说"没复制成功"并留下诊断**，不会假装复制过。
 - 「截图时隐藏 DSH 界面」靠**标题**找窗口（`DeepSeek Harness` 子串匹配）；窗口标题被改得

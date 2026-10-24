@@ -16,7 +16,7 @@ Screenshot, same as QQ: the button hangs **next to the "voice" button of the cha
 | ⏺ Record screen | Recording with ffmpeg gdigrab (H.264 + faststart). **By default you first select a region, then record** (see below); a red frame on screen marks the boundary, and clicking "stop" on the timer pill at the top right finishes it. Audio can be enabled from the menu (R41, off by default) |
 | Aa Extract text | **Offline OCR** after selecting a region (Windows built-in engine, nothing leaves the machine), producing a text panel that can be copied / pasted into the input box |
 | 译 Translate screen | After OCR, the text (with a translation-instruction prefix) is pasted into the input box and handed to DSH's own model to translate |
-| ⇕ Long screenshot | Select a region → the host scrolls one screen and captures a frame → align and stitch the overlapping area → the long image returns to the annotation UI |
+| ⇕ Long screenshot | Select a region → the host posts **one wheel notch at a time**, captures a frame per notch → align and stitch the overlapping area (frames that do not overlap are reported, never guessed) → the long image returns to the annotation UI |
 | ☐ Hide the DSH UI while capturing | The native overlay hides the DSH window **before freezing the desktop** (same as QQ); after selecting or cancelling, it is restored and brought back to the foreground; off by default, tick it in "More settings" |
 
 > **As of R33 the four items "Range / Pick a window to capture / Select the range yourself / Window capture method" were removed**, along with the whole mechanism that rendered a desktop screenshot inside the DSH window
@@ -158,6 +158,8 @@ a maximized window back into a normal-sized one).
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 checks: **what lands in the file** (records 2.5 s, extracts a frame: 0 red pixels, brightness within 8 %, both tones present)
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 32 checks: **the stitched long image itself** (numbered luma-band fixture, auto + manual arms: band order / each exactly once / every band 79 px / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — about 2 min
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -419,6 +421,16 @@ Equivalent offline way: append the `insert` line from this repo's `cordis.patch.
   **the control under the point**: when sent to the top-level window, Chromium honours it but **WinForms and other legacy applications do not**
   (measured: the top-level form only triggers its own MouseWheel and the content does not scroll; sending to the leaf from `WindowFromPoint` does scroll).
   When it is not honoured, it automatically degrades to moving the cursor. The self-drawn scroll containers of Qt / Java / Electron are **not yet measured one by one**.
+- The long screenshot scrolls **one wheel notch at a time, not "80 % of one screen"** (changed in R58). A wheel `delta` is in 1/120-notch units and the application then turns it into its own
+  line height (WinForms: 3 lines per notch). Sending a pixel amount (520 px region → `-416`) was read as 3.5 notches ≈ 10 lines ≈ **811 px, more than one screen**: consecutive frames shared no
+  overlap at all and the stitcher could only guess. It now sends notches (`DSH_SHOT_WHEEL_NOTCHES=1..3`, default 1); how far one notch moves is up to the target application.
+- The stitcher **refuses frame pairs that do not overlap**: a residual above the tolerance produces an error and keeps the session ("scrolled too far, do it in two passes"), instead of silently
+  emitting a tall, plausible, wrong picture (R58 measured +479 px of silently duplicated content). Frames that differ by only a few pixels (blinking caret, ticking clock) are recognised as
+  "the same picture" and skipped instead of contributing a duplicated strip.
+- After the coarse search on downscaled signatures, the offset is **refined at full resolution**: the coarse quantisation is ~4 px per signature pixel, which used to put every seam 2 px off
+  (2 px of content duplicated or lost per seam). Seams now land on the pixel (the probe asserts every band is exactly 79 px).
+- A **self-moving scrollbar** inside the captured region changes that column between frames; it is the one known nuisance for this algorithm, so the probe fixture hides its scrollbar and judges
+  the stitcher alone.
 - **The clipboard is an exclusive machine-wide resource**: if another program is holding it, copying a screenshot will fail (measured error: "the requested clipboard operation failed").
   The helper retries 4 times; if it still fails, **the client explicitly says "the copy did not succeed" and leaves diagnostics**; it will not pretend to have copied.
 - "Hide the DSH UI while capturing" finds the window by **title** (`DeepSeek Harness` substring match); if the window title is changed beyond
