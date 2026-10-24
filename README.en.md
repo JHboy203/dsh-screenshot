@@ -166,6 +166,8 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
                 args:['run','40','1','90','14']})                                  # lab: one auto session while a block inside the region repaints every 90 ms (the R61 case)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 25 checks: **the stitcher on REAL page texture** (real screen capture -> synthetic long page -> known frames -> compared with the truth pixel by pixel): plain scroll / animated block / motionless duplicate frame / a jump too far — 15 s (R63). Exits 2 (env) when the session is locked or the screen has no DISTINCT texture — not a regression
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/ocr-probe.mjs'})              # 29 checks: **OCR end to end** (node renders known text -> lib/shot.mjs#ocr()): white page of three lines / dark theme / degraded 11 px / blank page is not an error / only inside the rect — 17 s (R63)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -444,11 +446,22 @@ Equivalent offline way: append the `insert` line from this repo's `cordis.patch.
   (6 % of the width, clamped to 6..40 px) before searching (R59) — a visible scrollbar no longer matters. Measured: real R58 frames went from a refined residual of **0.20–0.22** (a blinking caret on
   the left edge) to **0.00** with the same offsets; a synthetic four-frame case (14 px scrollbar on the right, thumb moving every frame) yields offsets **237/237/237**, exactly the ground truth.
   Dynamic content **inside** the region (a video, a spinner, a chart that repaints every frame) keeps the whole region disagreeing between frames. The stitcher
-  scores normally first; only when that says "no overlap" does it retry with a **robust score** (drop the worst 30 % of rows) and then treat "the content did not
-  advance, only that small block changed" frames as **duplicates** (R61). Measured with a 220x130 block repainting every 90 ms inside the region: the capture used to
-  fail outright (residual 12.60 > 8.00, "frames do not overlap"); now the picture has all 24 bands in order, each exactly 79 px. **Known boundary**: the auto loop
-  cannot recognise "the bottom" in that situation (the frame never stops changing), so it runs to the frame cap and honestly reports `max-frames` ("the bottom may
-  be missing") — the picture itself is complete.
+  scores normally first; when that says "no overlap" it asks a different question — not "did the residual drop" but **where the disagreement lives**: an animation
+  is ONE compact region, a wrong offset disagrees all over (R63). Measured with a 220x130 block repainting every frame: the plain residual at the true shift is
+  **29.29** (no residual could ever accept it), while the disagreement box covers **0.48** of the overlap and **49 %** of it is over the threshold; a wrong offset is
+  **1.00** / 27 %. ⚠️ R61 used "drop the worst 30 % of rows" instead; that held on the colour-band fixture but on real texture it is drawn to the **narrowest**
+  overlap (truth 237 px, the trimmed score picked 386 / 397 / 509 and once silently added +160 px) — which is why R63 replaced it.
+- **A narrow overlap is not evidence** (R63): 27 rows of real text can agree by accident (mean residual **2.37**) and quietly double 256 rows. Below 35 % of the
+  frame height, only a **pixel-exact** match (residual <= 1.0) counts — the band fixture really does scroll 75 % per notch and is exact at 0.00 every time, so honest
+  captures are not caught by this.
+- A motionless duplicate frame is still decided **before** any stitching; getting the order wrong pushes such a frame in at a guessed offset — measured in R63 as
+  **158 px** of doubled content on the animated band arm.
+  **Known boundary**: the repainting block leaves a ghost in the picture (each frame pasted its own copy) — unavoidable when stitching; the auto loop also cannot
+  recognise "the bottom" in that situation (the frame never stops changing), so it runs to the frame cap and honestly reports `max-frames` ("the bottom may be
+  missing") — the picture itself is complete.
+- The claims above now have their own probe on **real texture** (R63): `dev/texreplay.py` turns one real screen capture into a long page and cuts known frames;
+  four arms assert "every offset exact / the result is pixel-identical to the truth (outside the animated block's columns) / the motionless frame is skipped /
+  a jump too far must be refused". It found two real bugs the first time it ran (the two ⚠️ points above).
 - The probe fixture hides its scrollbar by default; `-Scrollbar 1` keeps it, and the probe's fourth arm runs one auto session that way, so the paragraph above is not a claim on paper.
 - **The clipboard is an exclusive machine-wide resource**: if another program is holding it, copying a screenshot will fail (measured error: "the requested clipboard operation failed").
   The helper retries 4 times; if it still fails, **the client explicitly says "the copy did not succeed" and leaves diagnostics**; it will not pretend to have copied.

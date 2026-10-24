@@ -93,17 +93,18 @@ def mean_abs_diff(a, b):
 # disagrees forever and the residual ("do these frames overlap at all?") blows past MATCH_TOL --
 # measured on the fixture with a 220x130 block repainting every 90 ms: residual 12.60 > 8.00, i.e.
 # a perfectly good long capture was refused even though ~92 % of the picture matched.
-# What works: score the mean of the BEST 70 % of ROWS (trimmed_score). On the real animated pair
-# that is 3.54 at the true shift vs 5.35 / 5.72 one step either side, and at full resolution
-# 2.70 at 237 px vs 3.31 / 3.35 at 236 / 238 -- sharp enough to keep the seams exact.
-# ⚠️ Two other attempts measured worse and were dropped:
-#   ① subtract a BBOX of the disagreeing pixels: the box is only valid for the shift it was
-#      measured at, and on a small overlap it leaves too little to score (best masked score 14.87
-#      at a WRONG shift looked better than 12.60 at the true one);
-#   ② subtract row bands found at ZERO shift: those are "where the content moved", not "where
-#      something animates", so on a scrolling page the band covers the whole overlap (the mask
-#      then eats ~half the picture and the landscape goes flat).
-# Trimming PIXELS or COLUMNS (R59) is also wrong -- it flattens the landscape. Rows are fine.
+#
+# R61 solved that by scoring "the best 70 % of ROWS" (trimmed_score) and it held up on the colour
+# band fixture. On REAL page texture it does not (R63, dev/texreplay.py): trimming can always throw
+# disagreements away, so a row-trimmed landscape is drawn to the SMALLEST overlap -- with few rows
+# left, the flat ones dominate and the score goes to ~3 at a wrong offset. Measured on dense UI
+# texture (660 px wide region): truth 237 px; the row-trimmed best was 397 px / 386 px / 509 px,
+# and one seam of +160 px was accepted silently (residual 3.17 vs 4.10 at the true shift).
+#
+# What survives real texture is not a better average but a structural question -- see covered_change:
+# an animation is ONE compact region repainting in place, a wrong shift disagrees all over. Row
+# trimming therefore keeps only ONE job now: the bottom-of-page duplicate test, where its 30 %
+# margin is exactly what R61 measured.
 DYN_KEEP = 0.7
 
 
@@ -122,8 +123,10 @@ def row_means(diff, scale=8):
 def trimmed_score(a, b, keep=DYN_KEEP):
     """Mean abs diff over the BEST `keep` share of rows (drop the worst ones).
 
-    An animated band of rows disagrees at every candidate shift; dropping the worst 30 % of rows
-    keeps it out of the score, and on real content the landscape stays sharp to +-1 px.
+    ⚠️ NOT used to find a shift any more (R63: on dense texture it picks the smallest overlap).
+    It is the "same place, only something animating in it" test for the bottom of a page, where
+    the pair's shift is 0 and the only thing left to check is whether the residual really is one
+    animating band rather than a bad match.
     """
     means = row_means(ImageChops.difference(a, b))
     if not means:
@@ -153,17 +156,55 @@ def localized_change(a, b, tol=16, max_frac=0.35):
     return area <= max_frac * (a.size[0] * a.size[1])
 
 
-def find_shift(prev, cur, overlap_min, robust=False):
+# R63: what the animated-content fallback actually keys on.
+# The question is not "how big is the average residual" (an animation can own a fifth of the
+# picture and blow any average) but "WHERE is the disagreement": an animating block is ONE compact
+# region, while a wrong shift disagrees everywhere glyphs moved. Measured on dense UI texture
+# (dev/texreplay.py, 480x520 region, truth 237 px, a 220x130 block repainting every frame):
+#     true shift    disagreement bbox 0.36 of the overlap, 100 % of it inside the box  (the block)
+#     wrong shift   disagreement bbox 0.97 of the overlap                              (every glyph)
+#     no overlap    ~1.00                                                             (nothing agrees)
+# Both halves matter: the box alone would let a scattering of glyph noise through (a box drawn
+# around scattered pixels covers the picture but is nearly empty), the fill alone cannot tell a
+# big animation from a poor match.
+COVER_TOL = 24
+COVER_MAX_AREA = 0.6
+COVER_MIN_FILL = 0.3
+# How much of the frame must stay in the overlap before a match on it counts as evidence.
+# With a sliver of overlap, a handful of rows can agree by accident: measured on dense texture
+# (R63, dev/stitch-tex-probe.mjs) 27 rows of a 520 px frame gave a mean residual of 2.37 at a
+# 493 px shift where the truth was 237, and the stitcher silently doubled 256 rows. A sliver can
+# only prove a seam when it matches EXACTLY (residual <= DUP_TOL): the band fixture really does
+# scroll 75 % of the frame per step and its content really is identical, so refusing every narrow
+# overlap would break honest captures. Anything less exact than that goes to the structural
+# fallback, which insists on this share; if that finds nothing, the refusal is honest.
+MIN_OVERLAP_SHARE = 0.35
+
+
+def covered_change(a, b, tol=COVER_TOL, max_area=COVER_MAX_AREA, min_fill=COVER_MIN_FILL):
+    """True when the two frames agree EXCEPT inside one compact region (an animating block).
+
+    `a` and `b` are the overlapping crops of two frames at one candidate shift, so "they agree"
+    means "this shift is right". A wrong shift fails both ways: its disagreement box covers the
+    overlap AND most pixels inside that box disagree.
+    """
+    mask = ImageChops.difference(a, b).point(lambda v: 255 if v > tol else 0)
+    box = mask.getbbox()
+    if box is None:
+        return True
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    if area > max_area * (a.size[0] * a.size[1]):
+        return False
+    # A pixel over `tol` maps to 255, so the histogram's last bucket is the count of them.
+    return mask.histogram()[-1] >= min_fill * area
+
+
+def find_shift(prev, cur, overlap_min):
     """How far the content moved up between two frames (downscaled px) + the residual.
 
     Returns (shift, score). `score` is the mean abs difference of the best overlap: a real
     overlap scores near 0, a pair with no overlap scores high -- that is what lets the caller
     tell "found it" from "guessed something".
-
-    `robust` (R61) swaps in the trimmed score. It is only used as a SECOND pass when the plain
-    score says "no overlap": trimming hides an animated band, but on content that is mostly flat
-    (uniform padding, colour bands) it can be ~0 at several wrong offsets and then the search
-    under-counts shifts (measured: a 3840 px page stitched 480 px short).
     """
     w, h = prev.size
     best = None
@@ -173,7 +214,7 @@ def find_shift(prev, cur, overlap_min, robust=False):
         b = cur.crop((0, 0, w, h - s))
         if a.size[1] < 8:
             break
-        score = trimmed_score(a, b) if robust else mean_abs_diff(a, b)
+        score = mean_abs_diff(a, b)
         if best_score is None or score < best_score:
             best = s
             best_score = score
@@ -182,7 +223,52 @@ def find_shift(prev, cur, overlap_min, robust=False):
     return best, float(best_score)
 
 
-def refine_shift(prev_l, cur_l, guess, radius, robust=False):
+def find_covered_shift(prev_l, cur_l, overlap_min):
+    """The animated-content fallback, at FULL resolution (R63).
+
+    Returns (shift, plain residual) of the best candidate whose disagreement is one compact
+    region (covered_change), or (height, inf) when no shift qualifies -- "nothing matched", which
+    includes both a genuine jump and a page where too large an area animates.
+
+    Why full resolution and not the 2.6:1 signature the plain pass uses: an animated patch
+    repaints with fresh content, and a downscale SMEARS it across the whole width, so on the
+    signature every candidate disagrees everywhere (measured: the true shift scored 28.90 coarse
+    while a wrong shift scored 18.10 -- the structural test cannot see anything there). At full
+    resolution the same pair is unambiguous: the disagreement is exactly the patch (area 0.48 of
+    the overlap, 49 % of it over the 24-level threshold) and every neighbouring shift covers 1.00.
+
+    The residual it returns is NOT an acceptance test (it stays above MATCH_TOL at a correct
+    shift); covered_change already did the accepting. It is only the ranking among qualifiers.
+    Cost measured at 660x520: 0.17-0.26 s for 472 candidates, and it only runs when the plain
+    pass said "no overlap".
+
+    It needs MORE overlap than the plain pass to be trustworthy: the structural test asks "does
+    everything except one block agree", which at a 2 % overlap (11 rows of 520) is trivially true
+    and immediately wrong -- measured on the animated fixture, the fallback happily returned 509
+    px (truth 237) because 11 rows of dense text satisfied covered_change. Both passes therefore
+    stop at MIN_OVERLAP_SHARE.
+    """
+    w, h = prev_l.size
+    lo = max(2, overlap_min)
+    # Overlap = h - s, so the share is a limit on the LARGEST shift, not the smallest one.
+    hi = min(h - 8, int(round((1.0 - MIN_OVERLAP_SHARE) * h)))
+    best = None
+    best_score = None
+    for s in range(lo, max(lo + 1, hi)):
+        a = prev_l.crop((0, s, w, h))
+        b = cur_l.crop((0, 0, w, h - s))
+        if not covered_change(a, b):
+            continue
+        score = mean_abs_diff(a, b)
+        if best_score is None or score < best_score:
+            best = s
+            best_score = score
+    if best is None:
+        return h, float("inf")
+    return best, float(best_score)
+
+
+def refine_shift(prev_l, cur_l, guess, radius):
     """Refine a downscaled estimate at FULL resolution (R58).
 
     The signature is width-downscaled, so one downscaled pixel is `ratio` real pixels (~4.1 for
@@ -190,7 +276,6 @@ def refine_shift(prev_l, cur_l, guess, radius, robust=False):
     the true shift is 237. That is a 2 px wrong seam per frame -- invisible on screen, but it
     duplicates/drops 2 px of content per seam and it makes "exact" assertions impossible. One
     full-resolution pass inside +-radius of the coarse guess costs ~10 crops and removes it.
-    `robust` = the same trimmed-score second pass as find_shift (R61).
     """
     w, h = prev_l.size
     best = None
@@ -202,7 +287,7 @@ def refine_shift(prev_l, cur_l, guess, radius, robust=False):
         b = cur_l.crop((0, 0, w, h - s))
         if a.size[1] < 8:
             continue
-        score = trimmed_score(a, b) if robust else mean_abs_diff(a, b)
+        score = mean_abs_diff(a, b)
         if best_score is None or score < best_score:
             best = s
             best_score = score
@@ -259,6 +344,11 @@ def main(argv):
     #    合成用例见 .tmp-vision/mkstitch.py + .tools/dsh-stitch-check.py。
     offsets = []
     scores = []
+    # Per pair: did the final shift come from the ROBUST second pass? Reported in the JSON because
+    # "the trimmed score only when needed" is a behaviour, and a behaviour that cannot be observed
+    # cannot be asserted (R63: the dense-texture replay probe reads this to prove that ordinary
+    # page texture never needs the fallback).
+    robustUsed = []
     skipped = 0
     smin = max(4, int(round(overlap_min / ratio)))
     debug = os.environ.get("DSH_STITCH_DEBUG") == "1"
@@ -271,82 +361,95 @@ def main(argv):
             # R58 measured +479 px of extra height on a picture that looked plausible.
             offsets.append(0)
             scores.append(round(same, 2))
+            robustUsed.append(False)
             skipped += 1
             continue
         s_small, score = find_shift(prev_sig, cur_sig, smin)
-        # R61: plain scoring keeps seams exact on flat content, so it goes FIRST. Only when it
-        # says "no overlap" do we re-run with the trimmed score -- that is the case an animated
-        # region creates (measured: 12.60 > 8.00 on a pair that matched everywhere else).
+        # R61/R63: plain scoring keeps seams exact on ordinary content, so it goes FIRST.
         robust = False
-        if score > MATCH_TOL:
-            s2, score2 = find_shift(prev_sig, cur_sig, smin, robust=True)
-            if score2 <= MATCH_TOL:
-                s_small, score = s2, score2
-                robust = True
-        if debug:
-            print("dbg k=%d sig=%s s0=%d score=%.2f robust=%s" % (k, cur_sig.size, s_small, score, robust), file=sys.stderr)
-        # A best-in-range shift is NOT evidence of an overlap: when the content jumped farther
-        # than one frame there is nothing to match and the minimiser still returns something.
-        # The residual is what separates "found the seam" (near 0) from "guessed" (high).
-        if score > MATCH_TOL:
-            # R61: the pair may simply be "the same place with something animating in it" (the
-            # bottom of a page, where only a video/spinner still changes). That is a duplicate,
-            # not a broken capture -- but only when the difference really is localized.
+        unverified = False
+        if score <= MATCH_TOL:
+            guess = int(round(s_small * ratio))
+            s, precise = refine_shift(loupe[k - 1], loupe[k], guess, int(round(ratio)) + 2)
+            # Two ways a plain match can still be worthless, both measured in R63:
+            #   ① it only just fits (8.07 > 8.00 on an animated pair): the block at that moment was
+            #      small, so the residual sat right on the line and a re-run either way decides it;
+            #   ② it rests on a NARROW overlap (27 rows of dense text gave 2.37 at a wrong 493 px
+            #      shift and the stitcher doubled 256 rows): a sliver proves a seam only when it
+            #      matches EXACTLY, because the band fixture really does scroll 75 % per step.
+            # Both are handed to the structural search instead of being trusted or refused outright.
+            narrow = (height - s) < MIN_OVERLAP_SHARE * height and precise > DUP_TOL
+            if precise > MATCH_TOL or narrow:
+                s2, p2 = find_covered_shift(loupe[k - 1], loupe[k], overlap_min)
+                if p2 != float("inf"):
+                    s, precise, robust = s2, p2, True
+                else:
+                    unverified = True
+        else:
+            # Plain says "no overlap". Two explanations remain, and the ORDER matters:
+            #
+            # ① the page stopped scrolling and only something in it still repaints (video,
+            #    spinner, clock). That is a duplicate: stitching it would append invented rows --
+            #    measured on the band fixture in R63: the fallback below happily took it at 158 px
+            #    and the finished picture grew by 158 px of doubled content. So this is decided
+            #    first, by the R61 test (row-trimmed residual at ZERO shift + localized change).
+            # ② the content did scroll, and a compact region is repainting in place. That is
+            #    stitchable, but its residual stays above MATCH_TOL even at the true shift
+            #    (measured 29.29 on dense texture, 12.60 on bands), so no residual can accept it --
+            #    only the STRUCTURE of the disagreement can (covered_change).
             zero = trimmed_score(prev_sig, cur_sig)
             if zero <= MATCH_TOL and localized_change(prev_sig, cur_sig):
                 offsets.append(0)
                 scores.append(round(zero, 2))
+                robustUsed.append(False)
                 skipped += 1
                 continue
-            print(
-                "stitch: frames %d and %d do not overlap (best match residual %.2f > %.2f). "
-                "The content scrolled farther than one frame height between the two captures; "
-                "scroll in smaller steps and retry." % (k, k + 1, score, MATCH_TOL),
-                file=sys.stderr,
-            )
+            s, precise = find_covered_shift(loupe[k - 1], loupe[k], overlap_min)
+            robust = precise != float("inf")
+        if debug:
+            print("dbg k=%d sig=%s s0=%d score=%.2f robust=%s" % (k, cur_sig.size, s_small, score, robust), file=sys.stderr)
+        # A best-in-range shift is NOT evidence of an overlap: when the content jumped farther
+        # than one frame there is nothing to match and the minimiser still returns something.
+        # The residual is what separates "found the seam" (near 0) from "guessed" (high) -- and
+        # when no covered_change candidate exists either, the pair is genuinely unmatched.
+        if not robust and (score > MATCH_TOL or precise > MATCH_TOL or unverified):
+            if score > MATCH_TOL:
+                bad = score
+                print(
+                    "stitch: frames %d and %d do not overlap (best match residual %.2f > %.2f). "
+                    "The content scrolled farther than one frame height between the two captures; "
+                    "scroll in smaller steps and retry." % (k, k + 1, score, MATCH_TOL),
+                    file=sys.stderr,
+                )
+            else:
+                bad = precise
+                print(
+                    "stitch: frames %d and %d do not overlap at full resolution "
+                    "(residual %.2f > %.2f around a %d px guess)."
+                    % (k, k + 1, precise, MATCH_TOL, int(round(s_small * ratio))),
+                    file=sys.stderr,
+                )
             print(json.dumps({
                 "error": "no-overlap",
                 "frame": k + 1,
                 "frames": len(frames),
-                "score": round(score, 2),
+                "score": round(bad, 2),
                 "tolerance": MATCH_TOL,
             }), file=sys.stderr)
             return 3
-        guess = int(round(s_small * ratio))
-        s, precise = refine_shift(loupe[k - 1], loupe[k], guess, int(round(ratio)) + 2, robust=robust)
-        if robust and precise > MATCH_TOL:
-            # 粗搜用 robust 了，精修却不达标：退回普通精修，别让"鲁棒"把一个好接缝判死。
-            s, precise = refine_shift(loupe[k - 1], loupe[k], guess, int(round(ratio)) + 2)
         # R61: a pair whose best match is AT the lower search bound means "these two frames barely
         # move relative to each other" -- the bottom of the page where only something animating
         # still changes. Treat it as a duplicate (no new rows) instead of failing the capture.
-        if s <= max(3, int(round(8.0 / ratio))) and precise <= MATCH_TOL:
+        if not robust and s <= max(3, int(round(8.0 / ratio))) and precise <= MATCH_TOL:
             offsets.append(0)
             scores.append(round(precise, 2))
+            robustUsed.append(False)
             skipped += 1
             continue
-            offsets.append(0)
-            scores.append(round(precise, 2))
-            skipped += 1
-            continue
-        if precise > MATCH_TOL:
-            print(
-                "stitch: frames %d and %d do not overlap at full resolution "
-                "(residual %.2f > %.2f around a %d px guess)."
-                % (k, k + 1, precise, MATCH_TOL, guess),
-                file=sys.stderr,
-            )
-            print(json.dumps({
-                "error": "no-overlap",
-                "frame": k + 1,
-                "frames": len(frames),
-                "score": round(precise, 2),
-                "tolerance": MATCH_TOL,
-            }), file=sys.stderr)
-            return 3
         s = max(1, min(height - 1, s))
         offsets.append(s)
         scores.append(round(precise, 2))
+        robustUsed.append(robust)
 
     total = height + sum(offsets)
     canvas = Image.new("RGB", (width, total))
@@ -367,6 +470,7 @@ def main(argv):
         "frames": len(frames),
         "offsets": offsets,
         "scores": scores,
+        "robust": robustUsed,
         "skipped": skipped,
         "margin": margin,
     }))
