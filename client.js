@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({
 		 * "客户端是不是旧的"就永远判不出来（R38 实测：代码已是新的，回执还报 R33）。
 		 * 现在只有这一行，两处都引用它；`lib/health.mjs` 优先按 `CLIENT_BUILD = 'Rxx'` 读。
 		 */
-		const CLIENT_BUILD = 'R50'
+		const CLIENT_BUILD = 'R60'
 
 		/* ══════════════ 代次标记 + 跨热重载的 DOM 清理（R38）══════════════
 		 *
@@ -2974,10 +2974,15 @@ window.__ModuleLoader__.load({
 					toast('长截图收尾失败：' + reason, 5200)
 					return { ok: false, error: String((res && res.error) || 'end failed'), hint: reason }
 				}
+				const capped = res.stopReason === 'max-height' || res.stopReason === 'max-frames'
 				toast(
-					(res.stopReason === 'max-height' ? '长图到上限了：' : '长图完成：') +
+					(res.stopReason === 'max-height'
+						? '长图到上限了：'
+						: res.stopReason === 'max-frames'
+							? '长图到帧数上限了（后面可能没截完）：'
+							: '长图完成：') +
 						res.frames + ' 帧 → ' + res.width + '×' + res.height,
-					res.stopReason === 'max-height' ? 5200 : 2800
+					capped ? 5200 : 2800
 				)
 				// 交回覆盖层，可以继续标注 / 贴图 / 复制 / 贴进输入框
 				showOverlay({ id: res.id, dataUrl: res.dataUrl, hidden: false }, 'shot', false)
@@ -3039,13 +3044,23 @@ window.__ModuleLoader__.load({
 						// R25 多一种：自动滚发不出去（权限 / 用户握着鼠标）放弃，也要说清楚。
 						const why = st.stopReason === 'max-height'
 							? '已到长图上限（30000px），先拼这些'
-							: st.stopReason === 'wheel-refused'
-								? '自动滚发不出去（权限/鼠标被占用）· 改用「换我自己滚」'
-								: '已经到底了'
+							: st.stopReason === 'max-frames'
+								// R60：撞到帧数上限不是"到底了"。以前这里显示"已经到底了"，
+								// 用户看到的是一张正常的长图，根本不知道下半页没进来。
+								? '已到帧数上限（' + (st.maxFrames || 40) + ' 帧），后面可能没截进来'
+								: st.stopReason === 'wheel-refused'
+									? '自动滚发不出去（权限/鼠标被占用）· 改用「换我自己滚」'
+									: '已经到底了'
 						hint.textContent = why
 						// 一帧都没接到时 end() 会报 "not enough frames" —— 那句话对用户没有意义，
 						// 这里先把它换成能读的道理，收尾照走。
-						await done(st.stopReason === 'wheel-refused' ? '自动滚发不出去，没接到帧' : '')
+						await done(
+							st.stopReason === 'wheel-refused'
+								? '自动滚发不出去，没接到帧'
+								: st.stopReason === 'max-frames'
+									? '已到帧数上限，长图可能没截完'
+									: ''
+						)
 						return
 					}
 					if (st.paused && st.paused !== '') {

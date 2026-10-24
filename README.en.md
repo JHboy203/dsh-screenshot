@@ -158,7 +158,7 @@ a maximized window back into a normal-sized one).
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 checks: **what lands in the file** (records 2.5 s, extracts a frame: 0 red pixels, brightness within 8 %, both tones present)
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 47 checks: **the stitched long image itself** (numbered luma-band fixture; auto / manual / **scrollbar-visible** arms: band order / each exactly once / every band 79 px / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — 133 s
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 64 checks: **the stitched long image itself** (numbered luma-band fixture; auto / manual / **scrollbar-visible** / **3840 px tall page** arms: band order / each exactly once / every band its own height / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — 171 s
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -423,7 +423,12 @@ Equivalent offline way: append the `insert` line from this repo's `cordis.patch.
   When it is not honoured, it automatically degrades to moving the cursor. The self-drawn scroll containers of Qt / Java / Electron are **not yet measured one by one**.
 - The long screenshot scrolls **one wheel notch at a time, not "80 % of one screen"** (changed in R58). A wheel `delta` is in 1/120-notch units and the application then turns it into its own
   line height (WinForms: 3 lines per notch). Sending a pixel amount (520 px region → `-416`) was read as 3.5 notches ≈ 10 lines ≈ **811 px, more than one screen**: consecutive frames shared no
-  overlap at all and the stitcher could only guess. It now sends notches (`DSH_SHOT_WHEEL_NOTCHES=1..3`, default 1); how far one notch moves is up to the target application.
+  overlap at all and the stitcher could only guess. It now sends notches; how far one notch moves is up to the target application.
+- But **how far one notch moves is the application's decision**: 40 pt text moves ≈ 237 px per frame, 10 pt text only **60 px**. So "one notch per frame" caps the reachable height at
+  frame-cap × one notch — which on a dense small-font page is only ~2900 px, i.e. a 3840 px page is **silently truncated** (R60 measured: 40 frames stopped at 2880 px with an EMPTY `stopReason`,
+  so what the user got was a "normal-looking" long picture). The step is now **adaptive** (R60): after one frame the code knows what a notch is worth and raises the step to ~45 % of the region
+  height (max 3 notches, i.e. still well over half a frame of overlap); the same 3840 px page finishes in **18 frames** with every band exactly 160 px. Hitting the frame cap now sets
+  `stopReason='max-frames'` and the client says "the bottom may be missing" instead of "reached the end".
 - The stitcher **refuses frame pairs that do not overlap**: a residual above the tolerance produces an error and keeps the session ("scrolled too far, do it in two passes"), instead of silently
   emitting a tall, plausible, wrong picture (R58 measured +479 px of silently duplicated content). Frames that differ by only a few pixels (blinking caret, ticking clock) are recognised as
   "the same picture" and skipped instead of contributing a duplicated strip.

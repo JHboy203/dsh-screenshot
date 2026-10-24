@@ -154,7 +154,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/hide-self-probe.mjs'})     
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 项：录屏框在屏幕上的像素级证据（R53 起压在已知棋盘窗上；R55 起自己找干净子区 + 直接问"边框那一点归谁"）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-audio-probe.mjs'})     # 45 项：录屏录音（设备枚举/真带 AAC 音轨/坏设备照录/自动选设备档位/坐标参数类型守卫/auto 与挑选结果一致/并发 start 串行 + service 回执 already/孤儿录制清理/recspawn 退路与它的孤儿保护），约 55 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 项：**录进文件的那块画面**（真录 2.5s → 抽帧 → 视频里 0 个红框像素、亮度差 ≤8%、两色都在），约 13 秒
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 47 项：**长截图成品**（编号亮度色带夹具 → auto / manual / **滚动条可见** 三条真实臂 → 色带顺序 / 每条恰好一次 / 每条高度 79px / 内容结束位置；外加"两帧不重叠必须报错"的反向臂），133 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 64 项：**长截图成品**（编号亮度色带夹具 → auto / manual / **滚动条可见** / **3840px 长页面** 四条真实臂 → 色带顺序 / 每条恰好一次 / 每条高度 / 内容结束位置；外加"两帧不重叠必须报错"的反向臂），171 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # 排障用（不是探针、`dev/_*` 不入库）：跑一次会话并留下所有帧，逐对打印"真实位移 vs 拼接器报的偏移"
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -410,7 +410,14 @@ dsh plugin --profile desktop add <本目录或包名>
 - 长截图**一次滚一格滚轮，不是滚"一屏的 80%"**（R58 改的）。滚轮的 `delta` 单位是 1/120 格，
   应用再按自己的行高翻（WinForms 默认 3 行/格）：以前按像素发（520px 区域 → `-416`），
   被读成 3.5 格 ≈ 10 行，**一次滚掉 811px，比一屏还高** —— 两帧之间没有重叠，拼接器只能猜。
-  现在按格发（`DSH_SHOT_WHEEL_NOTCHES=1..3` 可调，默认 1）；一格的位移由目标应用决定。
+  现在按格发；一格的位移由目标应用决定。
+- 但**一格能滚多远是应用决定的**：40pt 大字一帧 ≈ 237px，而 10pt 小字一帧只有 **60px**。于是
+  "一帧固定一格"能覆盖的总高 = 帧数上限 × 一格 —— 后者在密集小字页面上只够 ~2900px，一张
+  3840px 的页面会被**静默截掉一截**（R60 实测：40 帧停在 2880px，`stopReason` 还是空的，用户
+  看到的就是一张"正常"的长图）。现在**每帧滚几格按实测位移自适应**（R60）：滚过一帧就知道一格
+  值多少像素，把步长调到区域高度的 ~45%（上限 3 格，重叠仍剩一大半）；同一张 3840px 页面
+  **18 帧**到底、每条色带 160px 一条不差。撞到帧数上限时 `stopReason='max-frames'`，
+  客户端会明说"后面可能没截完"，不再说"已经到底了"。
 - 拼接器**不接受"没有重叠的两帧"**：残差超过阈值就报错并保留会话（"滚得太多了，分两次滚"），
   **不会**再静默拼出一张又高又像真的错图（R58 用探针量到过 +479px 的静默重复内容）。
   只差几个像素的重复帧（光标闪烁、时钟跳秒）会被识别成"同一张画面"直接跳过，不再塞进一段重复内容。

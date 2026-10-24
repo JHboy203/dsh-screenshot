@@ -43,6 +43,12 @@ param(
   [int]$Bands = 24,
   [int]$FontPt = 40,
   [int]$Spaces = 120,
+  # Lines per band (default 1). R60: a *tall, dense* page needs tall bands -- with Bands more than
+  # ~24 the luma ramp collides (only ~206 integers between 26 and 232), so "make the page taller"
+  # has to come from band HEIGHT, not from band COUNT. Rows=8 at FontPt 10 (line height 20 px)
+  # gives 160 px bands and a 3840 px page, i.e. a page a fixed one-notch-per-frame loop cannot
+  # finish inside MAX_FRAMES=40 (40 x 60 px of wheel travel = 2920 px).
+  [int]$Rows = 1,
   [int]$Seconds = 180,
   # 0 = hide the vertical scrollbar (clean content), 1 = keep it visible (the edge-chrome case
   # the stitcher has to survive: its thumb moves between frames).
@@ -132,9 +138,14 @@ $lens = @()
 $i = 0
 while ($i -lt $Bands) {
   $line = ('BAND {0:D2} ' -f ($i + 1)) + $pad
+  # Rows>1: repeat the SAME paragraph line so the band is Rows lines tall. The label stays at the
+  # top of the band (the first line); the rest are padding, so a column to the right of the label
+  # reads one flat colour per band -- exactly what the probe samples.
+  $block = $line
+  if ($Rows -gt 1) { $block = $line + ("`n" + $line) * ($Rows - 1) }
   $starts += $rtb.TextLength
-  $rtb.AppendText($line)
-  $lens += $line.Length
+  $rtb.AppendText($block)
+  $lens += $block.Length
   if ($i -lt ($Bands - 1)) { $rtb.AppendText("`n") }
   $i += 1
 }
@@ -193,7 +204,7 @@ $form.add_Shown({
     while ($i -lt $Bands) {
       $pt = $rtb.GetPositionFromCharIndex($starts[$i])
       $y = [int]$pt.Y
-      $h = $lineH
+      $h = $lineH * [Math]::Max(1, $Rows)
       if ($i -lt ($Bands - 1)) {
         $pt2 = $rtb.GetPositionFromCharIndex($starts[$i + 1])
         $h = [int]$pt2.Y - $y

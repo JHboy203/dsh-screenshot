@@ -79,7 +79,15 @@ function check(item, ok, detail, kind) {
 
 let child = null
 let errFd = -1
-function startFixture(scrollbar = 0) {
+/**
+ * @param {number} scrollbar 0 = hide the vertical scrollbar, 1 = keep it (edge-chrome arm)
+ * @param {{fontPt?: number, rows?: number}} [opts] R60: `rows` makes each band N lines tall, i.e.
+ *   a TALL page at a SMALL font -- the case where one wheel notch only moves ~60 px and a fixed
+ *   one-notch-per-frame loop runs out of frames before the page ends.
+ */
+function startFixture(scrollbar = 0, opts = {}) {
+	const fontPt = Number(opts.fontPt ?? 40)
+	const rows = Number(opts.rows ?? 1)
 	try { fs.rmSync(INFO, { force: true }) } catch {}
 	try { fs.rmSync(FLOG, { force: true }) } catch {}
 	try { fs.rmSync(CONTROL, { force: true }) } catch {}
@@ -91,6 +99,7 @@ function startFixture(scrollbar = 0) {
 			'-X', String(FX), '-Y', String(FY), '-W', String(FW), '-H', String(FH),
 			'-Bands', String(BANDS), '-Seconds', String(SECONDS),
 			'-Scrollbar', String(scrollbar),
+			'-FontPt', String(fontPt), '-Rows', String(rows),
 			'-Log', FLOG, '-Info', INFO, '-Control', CONTROL,
 		],
 		{ windowsHide: false, stdio: ['ignore', errFd, errFd] }
@@ -261,10 +270,20 @@ async function waitDone(maxMs) {
 	return last
 }
 
-async function runArm(name, mode, drive) {
+/**
+ * @param {string} name
+ * @param {'auto'|'manual'} mode
+ * @param {() => Promise<any>} drive
+ * @param {{maxFrames?: number}} [opts] The frame cap this arm asks the session for. The 24-band
+ *   arms only need ~8 frames, so they run with 14 to keep the probe short; the TALL arm (R60)
+ *   must run with the product's own default (40), because the assertion is precisely "does it
+ *   finish a 57-frame-at-one-notch page inside the real cap".
+ */
+async function runArm(name, mode, drive, opts = {}) {
 	console.log(`\n--- ARM ${name} ---`)
 	const marks = fixtureLog().length
-	const begin = await scroll.scrollBegin(`${FX},${FY},${FW},${FH}`, { mode, maxFrames: 14, settleMs: 320 })
+	const maxFrames = Number(opts.maxFrames ?? 14)
+	const begin = await scroll.scrollBegin(`${FX},${FY},${FW},${FH}`, { mode, maxFrames, settleMs: 320 })
 	check(`${name}: begin accepted and claimed a target`, begin.ok === true && Number(begin.target) > 0, `target=${begin.target} '${begin.targetTitle ?? ''}' error='${begin.error ?? ''}'`)
 	if (begin.ok !== true) return null
 	if (typeof begin.active !== 'boolean') check(`${name}: begin reports active (client gates on it)`, false, 'missing field')
@@ -427,6 +446,59 @@ try {
 			if (d !== null) {
 				verify('scrollbar', d.out, infoD, BANDS, FH)
 				cleanupPng(d.out.path)
+			}
+		}
+	}
+
+	/* ─────────── ARM E (R60): a TALL page at a SMALL font ───────────
+	 * FontPt 10 -> line height 20 px -> ONE wheel notch (3 lines) moves 60 px. With `-Rows 8`
+	 * every band is 8 lines = 160 px tall, so the page is 24 x 160 = **3840 px**, i.e. 57 frames
+	 * at one notch per frame -- more than MAX_FRAMES (40). Measured before the fix: the session
+	 * stopped at 40 frames with 2880 px of picture and **stopReason ''**, i.e. a silently
+	 * truncated long screenshot. The fix measures the real shift after each frame and raises the
+	 * step to ~45 % of the region height (here 3 notches = 180 px), so the same page finishes in
+	 * ~18 frames. This arm asserts both halves: it reached the end, and it did so by adapting.
+	 */
+	console.log('\n--- ARM tall: 3840 px page at a small font (the frame cap used to cut it silently) ---')
+	try { if (child !== null) child.kill() } catch {}
+	await sleep(600)
+	startFixture(0, { fontPt: 10, rows: 8 })
+	const infoE = await waitInfo(20000)
+	const totalE = Number(infoE?.totalH ?? 0)
+	const bandHE = Number(infoE?.bands?.[0]?.h ?? 0)
+	check(
+		'tall fixture is really 3840 px tall (57 frames at one notch, more than the 40-frame cap)',
+		infoE !== null && totalE >= 3700 && bandHE === 160,
+		infoE === null ? 'no Info file' : `totalH=${totalE} bandH=${bandHE} lineH=${infoE.lineH}`
+	)
+	if (infoE !== null) {
+		const hitE = await shot.hitTest(Math.round(infoE.x + infoE.w / 2), Math.round(infoE.y + infoE.h / 2))
+		const mineE = Number(hitE.hwnd) === Number(infoE.hwnd)
+		check(
+			'the tall fixture is the window under the region centre',
+			mineE,
+			`hit=${hitE.hwnd} '${hitE.title ?? ''}' want=${infoE.hwnd}`,
+			mineE ? undefined : 'env'
+		)
+		if (!mineE) {
+			console.log('   SKIP   tall-page arm: something else is on top of the region')
+		} else {
+			const e = await runArm('tall', 'auto', async () => await waitDone(DONE_TIMEOUT_MS), { maxFrames: 40 })
+			if (e !== null) {
+				// 先判"没被截断"，再判内容本身 —— 否则高度不够时报出来的是七八条色带错位，
+				// 看起来像拼接器坏了，真正的原因却是"根本没抓完"。
+				check(
+					'tall: the session did not hit the frame cap (no silent truncation)',
+					String(e.out.stopReason ?? '') !== 'max-frames' && Number(e.out.frames) < 40,
+					`frames=${e.out.frames} stopReason='${e.out.stopReason ?? ''}'`
+				)
+				check(
+					'tall: the step adapted beyond one notch',
+					Number(e.out.notches) >= 2,
+					`notches=${e.out.notches} lastShiftPx=${e.out.lastShiftPx}`
+				)
+				verify('tall', e.out, infoE, BANDS, FH)
+				cleanupPng(e.out.path)
 			}
 		}
 	}
