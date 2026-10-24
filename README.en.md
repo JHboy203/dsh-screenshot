@@ -158,7 +158,7 @@ a maximized window back into a normal-sized one).
 ```
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 checks: **what lands in the file** (records 2.5 s, extracts a frame: 0 red pixels, brightness within 8 %, both tones present)
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 64 checks: **the stitched long image itself** (numbered luma-band fixture; auto / manual / **scrollbar-visible** / **3840 px tall page** arms: band order / each exactly once / every band its own height / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — 171 s
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 81 checks: **the stitched long image itself** (numbered luma-band fixture; auto / manual / **scrollbar-visible** / **3840 px tall page** / **animated region** arms: band order / each exactly once / every band its own height / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — 166 s
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -437,7 +437,12 @@ Equivalent offline way: append the `insert` line from this repo's `cordis.patch.
 - Chrome that moves **on the region's edge** (a scrollbar thumb, a resize grip, an edge overlay) never agrees between frames, so the stitcher now **trims the outer edge on both passes**
   (6 % of the width, clamped to 6..40 px) before searching (R59) — a visible scrollbar no longer matters. Measured: real R58 frames went from a refined residual of **0.20–0.22** (a blinking caret on
   the left edge) to **0.00** with the same offsets; a synthetic four-frame case (14 px scrollbar on the right, thumb moving every frame) yields offsets **237/237/237**, exactly the ground truth.
-  Dynamic content **inside** the region (video, animations, a centred progress bar) is still a known nuisance — that is no longer "edge chrome" and must be argued from the content's own overlap.
+  Dynamic content **inside** the region (a video, a spinner, a chart that repaints every frame) keeps the whole region disagreeing between frames. The stitcher
+  scores normally first; only when that says "no overlap" does it retry with a **robust score** (drop the worst 30 % of rows) and then treat "the content did not
+  advance, only that small block changed" frames as **duplicates** (R61). Measured with a 220x130 block repainting every 90 ms inside the region: the capture used to
+  fail outright (residual 12.60 > 8.00, "frames do not overlap"); now the picture has all 24 bands in order, each exactly 79 px. **Known boundary**: the auto loop
+  cannot recognise "the bottom" in that situation (the frame never stops changing), so it runs to the frame cap and honestly reports `max-frames` ("the bottom may
+  be missing") — the picture itself is complete.
 - The probe fixture hides its scrollbar by default; `-Scrollbar 1` keeps it, and the probe's fourth arm runs one auto session that way, so the paragraph above is not a claim on paper.
 - **The clipboard is an exclusive machine-wide resource**: if another program is holding it, copying a screenshot will fail (measured error: "the requested clipboard operation failed").
   The helper retries 4 times; if it still fails, **the client explicitly says "the copy did not succeed" and leaves diagnostics**; it will not pretend to have copied.

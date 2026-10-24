@@ -50,6 +50,13 @@ param(
   # finish inside MAX_FRAMES=40 (40 x 60 px of wheel travel = 2920 px).
   [int]$Rows = 1,
   [int]$Seconds = 180,
+  # Millisecond interval of the ANIMATED block (0 = none). R61: the last remaining known
+  # nuisance of the stitcher is "dynamic content INSIDE the captured region" (a video, a spinner,
+  # a clock). A block that repaints in place is exactly that case: it stays at the same SCREEN
+  # position while the content scrolls under it, so it poisons the overlap search and (worse) it
+  # keeps the whole-frame fingerprint changing, which is what the auto loop used to read as
+  # "the page is still scrolling".
+  [int]$Animate = 0,
   # 0 = hide the vertical scrollbar (clean content), 1 = keep it visible (the edge-chrome case
   # the stitcher has to survive: its thumb moves between frames).
   [int]$Scrollbar = 0,
@@ -142,7 +149,14 @@ while ($i -lt $Bands) {
   # top of the band (the first line); the rest are padding, so a column to the right of the label
   # reads one flat colour per band -- exactly what the probe samples.
   $block = $line
-  if ($Rows -gt 1) { $block = $line + ("`n" + $line) * ($Rows - 1) }
+  if ($Rows -gt 1) {
+    # ⚠️ Repeat the SAME padding line -- do NOT give every line its own text (tried in R61): the
+    # band label sits at the LEFT, and the probe/signature look at the middle/right, where every
+    # line then looks identical again; the only thing that changed was that the picture became
+    # vertically textured enough for the overlap search to lock one band off (measured: a seam
+    # 40 px off, the tall arm's picture 3880 px instead of 3840).
+    $block = $line + ("`n" + $line) * ($Rows - 1)
+  }
   $starts += $rtb.TextLength
   $rtb.AppendText($block)
   $lens += $block.Length
@@ -227,6 +241,7 @@ $form.add_Shown({
       fontPt = $FontPt
       padChars = $lens[0]
       scrollbar = $Scrollbar
+      animate = $Animate
     }
     if ($Info -ne '') {
       [System.IO.File]::WriteAllText($Info, ($payload | ConvertTo-Json -Compress -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
@@ -262,6 +277,35 @@ $form.add_Shown({
     $script:lastLine = FirstVisibleLine
   } catch { Log @{ ok = $false; ev = 'shown'; error = "$_" } }
 })
+
+# The animated block (R61): a panel painted on top of the text, at a FIXED screen position.
+# It is deliberately NOT under the probe's sample column (0.62 W = 409) and NOT under the region
+# centre (the wheel goes there), so band reading and wheel delivery stay untouched -- the only
+# thing it disturbs is the pixel comparison between frames, which is the point.
+if ($Animate -gt 0) {
+  $blk = New-Object System.Windows.Forms.Panel
+  $blk.Location = New-Object System.Drawing.Point(40, 40)
+  $blk.Size = New-Object System.Drawing.Size(220, 130)
+  $blk.BackColor = [System.Drawing.Color]::FromArgb(0, 160, 240)
+  $form.Controls.Add($blk)
+  $blk.BringToFront()
+  $script:animN = 0
+  $anim = New-Object System.Windows.Forms.Timer
+  $anim.Interval = [Math]::Max(30, $Animate)
+  $anim.add_Tick({
+    try {
+      $script:animN = 1 + [int]$script:animN
+      $k = $script:animN % 6
+      $r = 20 + $k * 30
+      $g = 200 - $k * 25
+      $b = 60 + $k * 20
+      $blk.BackColor = [System.Drawing.Color]::FromArgb($r, $g, $b)
+      # Also move the block a little: real "video" is not a static rectangle of changing colour.
+      $blk.Location = New-Object System.Drawing.Point((40 + ($k * 3)), (40 + ($k * 2)))
+    } catch {}
+  })
+  $anim.Start()
+}
 
 $poll = New-Object System.Windows.Forms.Timer
 $poll.Interval = 120

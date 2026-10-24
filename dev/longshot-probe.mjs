@@ -81,13 +81,16 @@ let child = null
 let errFd = -1
 /**
  * @param {number} scrollbar 0 = hide the vertical scrollbar, 1 = keep it (edge-chrome arm)
- * @param {{fontPt?: number, rows?: number}} [opts] R60: `rows` makes each band N lines tall, i.e.
- *   a TALL page at a SMALL font -- the case where one wheel notch only moves ~60 px and a fixed
- *   one-notch-per-frame loop runs out of frames before the page ends.
+ * @param {{fontPt?: number, rows?: number, animate?: number}} [opts]
+ *   R60 `rows`: each band N lines tall -> a TALL page at a SMALL font (one notch only moves
+ *   ~60 px there, so a fixed one-notch loop runs out of frames before the page ends).
+ *   R61 `animate`: ms interval of a block that repaints in place INSIDE the region (video /
+ *   spinner / clock) -- the case that used to be refused as "frames do not overlap".
  */
 function startFixture(scrollbar = 0, opts = {}) {
 	const fontPt = Number(opts.fontPt ?? 40)
 	const rows = Number(opts.rows ?? 1)
+	const animate = Number(opts.animate ?? 0)
 	try { fs.rmSync(INFO, { force: true }) } catch {}
 	try { fs.rmSync(FLOG, { force: true }) } catch {}
 	try { fs.rmSync(CONTROL, { force: true }) } catch {}
@@ -99,7 +102,7 @@ function startFixture(scrollbar = 0, opts = {}) {
 			'-X', String(FX), '-Y', String(FY), '-W', String(FW), '-H', String(FH),
 			'-Bands', String(BANDS), '-Seconds', String(SECONDS),
 			'-Scrollbar', String(scrollbar),
-			'-FontPt', String(fontPt), '-Rows', String(rows),
+			'-FontPt', String(fontPt), '-Rows', String(rows), '-Animate', String(animate),
 			'-Log', FLOG, '-Info', INFO, '-Control', CONTROL,
 		],
 		{ windowsHide: false, stdio: ['ignore', errFd, errFd] }
@@ -499,6 +502,59 @@ try {
 				)
 				verify('tall', e.out, infoE, BANDS, FH)
 				cleanupPng(e.out.path)
+			}
+		}
+	}
+
+	/* ─────────── ARM F (R61): something INSIDE the region animates ───────────
+	 * The last known nuisance: a video / spinner / clock that stays at a fixed SCREEN position
+	 * while the content scrolls under it. Measured before the fix: the stitcher refused the whole
+	 * capture ("frames 1 and 2 do not overlap, residual 12.60 > 8.00") even though ~92 % of the
+	 * picture matched, and the auto loop never saw "the page stopped" because the whole-frame
+	 * fingerprint kept changing. Now the score trims the worst rows (an animated band cannot
+	 * poison it) and the loop's bottom test is "how much of the picture changed", not "are the
+	 * pixels identical". Both halves are asserted here.
+	 */
+	console.log('\n--- ARM animated: a 220x130 block repainting inside the region ---')
+	try { if (child !== null) child.kill() } catch {}
+	await sleep(600)
+	startFixture(0, { animate: 90 })
+	const infoF = await waitInfo(20000)
+	check(
+		'animated fixture is really animating (its block repaints every 90 ms)',
+		infoF !== null && Number(infoF.animate) === 90,
+		infoF === null ? 'no Info file' : `animate=${infoF.animate}`
+	)
+	if (infoF !== null) {
+		const hitF = await shot.hitTest(Math.round(infoF.x + infoF.w / 2), Math.round(infoF.y + infoF.h / 2))
+		const mineF = Number(hitF.hwnd) === Number(infoF.hwnd)
+		check(
+			'the animated fixture is the window under the region centre',
+			mineF,
+			`hit=${hitF.hwnd} '${hitF.title ?? ''}' want=${infoF.hwnd}`,
+			mineF ? undefined : 'env'
+		)
+		if (!mineF) {
+			console.log('   SKIP   animated arm: something else is on top of the region')
+		} else {
+			const f = await runArm('animated', 'auto', async () => await waitDone(DONE_TIMEOUT_MS), { maxFrames: 14 })
+			if (f !== null) {
+				verify('animated', f.out, infoF, BANDS, FH)
+				// R61 的诚实边界：区域里那块东西一直在动时，循环**认不出"到底"**（整帧永远在变），
+				// 它会走到帧数上限并如实报 max-frames；拼接器把那几帧重复的尾巴跳掉，成品仍完整。
+				// 所以这里断言的是"如实报"，不是"提前收"。
+				const capped = Number(f.out.frames) >= 14
+				check(
+					'animated: a capped session says so (max-frames), it never pretends to have reached the bottom',
+					!capped || String(f.out.stopReason ?? '') === 'max-frames',
+					`frames=${f.out.frames} stopReason='${f.out.stopReason ?? ''}'`
+				)
+				check(
+					'animated: the duplicate tail was skipped, not stitched in',
+					Number(f.out.frames) > 8 && f.out.ok === true,
+					`frames=${f.out.frames} ok=${f.out.ok}`
+				)
+				cleanupPng(f.out.path)
 			}
 		}
 	}
