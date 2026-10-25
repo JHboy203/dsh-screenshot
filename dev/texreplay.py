@@ -351,15 +351,165 @@ def cmd_compare(argv):
     return 0
 
 
+def cmd_landscape(args):
+    """Per-pair decision landscape: who wins, by which scorer, and where the truth sits.
+
+    This is the R63 investigation turned into a tool. The bug it found was invisible from the
+    product's JSON: every scorer reported "a number", and only by printing the TOP CANDIDATES of
+    each scorer next to the true shift did it become obvious that row trimming is drawn to the
+    narrowest overlap (truth 237 -> 386 / 397 / 509) and that plain residual cannot accept the
+    truth at all on an animated pair (29.29). Keep it next to build/compare: the next person to
+    touch the stitcher will need this view, and re-deriving it costs an hour.
+
+    usage: texreplay.py landscape --dir <built dir> --pair <k> [--top 5]
+    """
+    opts = {"dir": "", "pair": 1, "top": 5}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--"):
+            key = a[2:].replace("-", "_")
+            i += 1
+            val = args[i] if i < len(args) else ""
+            opts[key] = int(val) if key in ("pair", "top") else val
+        i += 1
+    d = opts.get("dir") or ""
+    pair = int(opts.get("pair") or 1)
+    top_n = int(opts.get("top") or 5)
+    if not d or not os.path.isdir(d):
+        print(json.dumps({"ok": False, "error": "need --dir <built dir> (from `build`)"}))
+        return 2
+    truth_path = os.path.join(d, "truth.json")
+    if not os.path.isfile(truth_path):
+        print(json.dumps({"ok": False, "error": "no truth.json in " + d}))
+        return 2
+    with open(truth_path, "r") as f:
+        truth = json.load(f)
+    offsets = truth.get("offsets") or []
+    frames = truth.get("frames") or []
+    if pair < 1 or pair > len(offsets) or pair >= len(frames):
+        print(json.dumps({"ok": False, "error": "pair out of range", "pairs": len(offsets)}))
+        return 2
+    want = int(offsets[pair - 1])
+
+    # The stitcher is imported, not copied: a copy would drift and then "explain" the wrong code.
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "py"))
+    import stitch  # noqa: E402  (path has to be set up first)
+
+    prev = Image.open(os.path.join(d, frames[pair - 1])).convert("L")
+    cur = Image.open(os.path.join(d, frames[pair]))
+    w, h = prev.size
+    margin = max(6, min(40, int(w * 0.06)))
+    a = prev.crop((margin, 0, w - margin, h))
+    b = cur.convert("L").crop((margin, 0, w - margin, h))
+    hh = h
+
+    def probe(s):
+        """Every number the four candidate criteria would look at, at this shift.
+
+        Kept C-speed on purpose (no numpy on this machine, and a pure-Python per-pixel loop over
+        486 shifts takes minutes): per-row means come from a BOX resize to 1 x rows, the trimmed
+        pixel mean from a histogram walk, and the structure test is stitch's own constants.
+        """
+        s = int(s)
+        # s == 0 is legal and meaningful: on the `dup` arm the true answer IS "the same picture",
+        # so the landscape must be able to show the numbers at 0 instead of returning nothing.
+        if s < 0 or s >= hh - 8:
+            return None
+        # Same convention as stitch.find_shift: content scrolled UP by s, i.e. prev rows [s..h)
+        # line up with cur rows [0..h-s). Getting this backwards silently "explains" a wrong
+        # shift -- it made truth 237 look like a 52.41 mismatch the first time this ran.
+        top = a.crop((0, s, a.size[0], hh))
+        bot = b.crop((0, 0, b.size[0], hh - s))
+        overlap_h = hh - s
+        diff = ImageChops.difference(top, bot)
+        plain = ImageStat.Stat(diff).mean[0]
+        # Row trim (the R61 scorer): drop the worst 30 % of ROWS, average the rest.
+        row_img = diff.resize((1, overlap_h), Image.BOX)
+        row_means = [row_img.getpixel((0, y)) for y in range(overlap_h)]
+        keep_rows = sorted(row_means)[:max(1, int(round(len(row_means) * 0.7)))]
+        row_trim = sum(keep_rows) / float(len(keep_rows))
+        # Pixel trim (tried and rejected in R63): average only the largest 30 % of pixel
+        # differences. On UI pages this collapses (most of the page is flat background).
+        hist = diff.histogram()
+        total_px = overlap_h * a.size[0]
+        cut = int(total_px * 0.3)
+        acc = 0
+        ssum = 0.0
+        cnt = 0
+        for v in range(255, -1, -1):
+            n = hist[v]
+            if not n:
+                continue
+            take = min(n, cut - acc)
+            if take > 0:
+                ssum += v * take
+                cnt += take
+                acc += take
+            if acc >= cut:
+                break
+        pixel_trim = ssum / float(cnt or 1)
+        # Structure (the R63 criterion): is the disagreement ONE compact region?
+        mask = ImageChops.difference(top, bot).point(lambda v: 255 if v > stitch.COVER_TOL else 0)
+        box = mask.getbbox()
+        if box is None:
+            area = 0.0
+            fill = 0.0
+            covered = True
+        else:
+            bx = (box[2] - box[0]) * (box[3] - box[1])
+            area = bx / float(total_px or 1)
+            fill = mask.histogram()[-1] / float(bx or 1)
+            covered = area <= stitch.COVER_MAX_AREA and fill >= stitch.COVER_MIN_FILL
+        return {
+            "shift": s,
+            "plain": round(plain, 2),
+            "rowTrim": round(row_trim, 2),
+            "pixelTrim": round(pixel_trim, 2),
+            "rows": round(overlap_h / float(hh), 3),
+            "area": round(area, 3),
+            "fill": round(fill, 3),
+            "covered": bool(covered),
+        }
+
+    lo_shift = max(4, int(round(hh * 0.05)))
+    every = [x for x in (probe(s) for s in range(lo_shift, hh - 8)) if x]
+    at_truth = probe(want)
+
+    def best(key):
+        return sorted(every, key=lambda e: e[key])[:top_n]
+
+    print(json.dumps({
+        "ok": True,
+        "pair": pair,
+        "truth": want,
+        "region": {"width": w, "height": hh, "margin": margin},
+        "atTruth": at_truth,
+        "top": {
+            "plain": best("plain"),
+            "rowTrim": best("rowTrim"),
+            "pixelTrim": best("pixelTrim"),
+            "covered": [e for e in every if e["covered"]][:top_n],
+        },
+        "counts": {
+            "shifts": len(every),
+            "covered": len([e for e in every if e["covered"]]),
+        },
+    }))
+    return 0
+
+
 def main(argv):
     if len(argv) < 1:
-        print("usage: texreplay.py build|compare ...", file=sys.stderr)
+        print("usage: texreplay.py build|compare|landscape ...", file=sys.stderr)
         return 2
     cmd = argv[0]
     if cmd == "build":
         return cmd_build(argv[1:])
     if cmd == "compare":
         return cmd_compare(argv[1:])
+    if cmd == "landscape":
+        return cmd_landscape(argv[1:])
     print(json.dumps({"ok": False, "error": "unknown command " + cmd}))
     return 2
 

@@ -462,6 +462,11 @@ Equivalent offline way: append the `insert` line from this repo's `cordis.patch.
 - The claims above now have their own probe on **real texture** (R63): `dev/texreplay.py` turns one real screen capture into a long page and cuts known frames;
   four arms assert "every offset exact / the result is pixel-identical to the truth (outside the animated block's columns) / the motionless frame is skipped /
   a jump too far must be refused". It found two real bugs the first time it ran (the two ⚠️ points above).
+- Before touching the stitcher, run `texreplay.py landscape` (R64): it prints **the top candidates of every scorer** next to **the four numbers
+  at the true shift** (`python dev/texreplay.py landscape --dir <built dir> --pair <k>`). None of the four R63 bugs was visible from the product
+  JSON — every scorer reports "a number". Measured on real texture (truth 237): on a plain scroll the truth is the only 0.00 and the structural
+  criterion accepts **exactly one** of 486 shifts; on the animated page the plain residual at the truth is **29.33** (no residual could accept it)
+  while both plain and row trimming pick **511** (the narrowest overlap) — and the structural criterion still accepts only the truth.
 - The probe fixture hides its scrollbar by default; `-Scrollbar 1` keeps it, and the probe's fourth arm runs one auto session that way, so the paragraph above is not a claim on paper.
 - **The clipboard is an exclusive machine-wide resource**: if another program is holding it, copying a screenshot will fail (measured error: "the requested clipboard operation failed").
   The helper retries 4 times; if it still fails, **the client explicitly says "the copy did not succeed" and leaves diagnostics**; it will not pretend to have copied.
