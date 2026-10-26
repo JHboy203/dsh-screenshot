@@ -19,10 +19,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { lab } from './labpath.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.dirname(HERE)
-const LAB = path.join('D:\\信息库\\AI工作区', '.tmp-shot-lab', 'record-integrity')
+const LAB = lab('record-integrity')
 fs.mkdirSync(LAB, { recursive: true })
 // CACHE_DIR is read at import time, so this has to happen before the module is loaded.
 process.env.DSH_SHOT_CACHE = path.join(LAB, 'cache')

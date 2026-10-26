@@ -24,10 +24,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { lab } from './labpath.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.dirname(HERE)
-const LAB = 'D:\\信息库\\AI工作区\\.tmp-shot-lab\\host'
+const LAB = lab('host')
 /** 夹具在 dev/ 里（见文件头那条说明）：产物目录会被清理，夹具不能待在那儿。 */
 const SCROLLER_PS1 = path.join(HERE, 'scroller.ps1')
 const SCRATCH = path.join(LAB, 'scratch')

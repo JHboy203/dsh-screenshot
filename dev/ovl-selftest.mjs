@@ -14,7 +14,7 @@
  * （DOM 那边能截图，WinForms 窗体截不到），改 UI 之后务必肉眼读一次。
  *
  * 跑法（必须让它能写目标目录）：
- *   set DSH_OVERLAY_DIR=D:\信息库\AI工作区\_ovl
+ *   set DSH_OVERLAY_DIR=<some empty dir>
  *   node DSH-Plugin/dsh-screenshot/dev/ovl-selftest.mjs
  *
  * 不设 DSH_OVERLAY_DIR 时落在插件自己的 `.cache/overlay` —— 那要求由插件宿主来跑，

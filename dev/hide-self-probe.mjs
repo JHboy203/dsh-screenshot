@@ -18,10 +18,11 @@
 // ⚠️ It really does hide the DSH window for ~1.5s (the overlay covers the screen meanwhile).
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { lab } from './labpath.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.dirname(HERE)
-const LAB = path.join('D:\\信息库\\AI工作区', '.tmp-shot-lab', 'hide-self')
+const LAB = lab('hide-self')
 
 // Must be set BEFORE importing lib/overlay.mjs: OVERLAY_DIR is read at module load. A separate
 // request dir also keeps this probe's helper from fighting the app's resident one for requests

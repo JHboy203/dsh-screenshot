@@ -34,10 +34,11 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readPng } from './png.mjs'
+import { lab } from './labpath.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.dirname(HERE)
-const LAB = path.join('D:\\信息库\\AI工作区', '.tmp-shot-lab', 'wheel-app')
+const LAB = lab('wheel-app')
 const CAPTURE = path.join(PLUGIN, 'ps', 'capture.ps1')
 const QT_FIXTURE = path.join(HERE, 'qt-scroll-fixture.pyw')
 const JAVA_FIXTURE = path.join(HERE, 'SwingScrollFixture.java')
@@ -50,7 +51,7 @@ const arg = (name, dflt) => {
 const APP = String(arg('-App', '')).toLowerCase()
 const TITLE_ARG = String(arg('-Title', ''))
 const SECONDS = Number(arg('-Seconds', '60')) || 60
-const QT_PATH = String(arg('-QtPath', path.join('D:\\信息库\\AI工作区', '.tmp-shot-lab', 'pyqt')))
+const QT_PATH = String(arg('-QtPath', lab('pyqt')))
 
 const shot = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'shot.mjs')).href)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))

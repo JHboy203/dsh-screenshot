@@ -32,10 +32,11 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readPng } from './png.mjs'
+import { lab } from './labpath.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.dirname(HERE)
-const LAB = path.join('D:\\信息库\\AI工作区', '.tmp-shot-lab', 'recframe')
+const LAB = lab('recframe')
 const FRAME = path.join(PLUGIN, 'ps', 'recframe.ps1')
 const CAPTURE = path.join(PLUGIN, 'ps', 'capture.ps1')
 const BACKDROP = path.join(HERE, 'recframe-backdrop.ps1')
@@ -502,7 +503,18 @@ const kindAt = (p) => cover.pts.find((q) => q.x === p[0] && q.y === p[1]) ?? { h
 const barKind = kindAt(BAR_PT)
 const midKind = kindAt(MID_PT)
 const barOk = barHit.ok === true && Number(barHit.hwnd) === Number(frameInfo?.hwnd) && Number(frameInfo?.hwnd) > 0
-const barVerdict = coverVerdict(barOk, barKind.kind === 'third' ? 1 : 0)
+/**
+ * R66: "a THIRD window owned that point" is evidence even when the classification pass a
+ * moment later no longer sees it. Measured 2026-10-26 (the run right after the skin change):
+ * barHit said hwnd=10946280 while the classify pass 300 ms later already saw the frame again,
+ * so the verdict fell back to "product regression" with border counts 0/0/0/0 -- the exact
+ * R64 false red. Both measurements are real observations of the same point; either one is
+ * enough to call it environment.
+ */
+const barThird =
+	barKind.kind === 'third' ||
+	(barHit.ok === true && Number(barHit.hwnd) > 0 && Number(barHit.hwnd) !== Number(frameInfo?.hwnd) && Number(barHit.hwnd) !== Number(bd.hwnd))
+const barVerdict = coverVerdict(barOk, barThird ? 1 : 0)
 check(
 	'a point on the border bar belongs to the frame (topmost, and its region covers the bars)',
 	barVerdict === 'pass',
@@ -528,13 +540,15 @@ const isBorder = (c) => near(c, BORDER, 40)
 const counts = {}
 for (const [name, r] of Object.entries(b)) counts[name] = countIn(img, r[0], r[1], r[2], r[3], isBorder)
 const borderOk = Object.values(counts).every((n) => n >= REGION.w * 0.6 || n >= REGION.h * 0.6)
-const borderVerdict = coverVerdict(borderOk, cover.third)
+const borderVerdict = coverVerdict(borderOk, cover.third > 0 || barThird ? 1 : 0)
 check(
 	'border is drawn OUTSIDE the captured rect on all four sides',
 	borderVerdict === 'pass',
 	JSON.stringify(counts) +
 		` (need >=60% of each side)` +
-		(borderVerdict === 'env' ? `；${cover.third}/${cover.pts.length} 个边框取样点上是**别的窗口** —— 边框被盖住了，不是没画` : ''),
+		(borderVerdict === 'env'
+			? `；${cover.third}/${cover.pts.length} 个取样点 + 边框那一点上都见过**别的窗口** —— 边框被盖住了，不是没画`
+			: ''),
 	borderVerdict === 'env' ? 'env' : undefined
 )
 check(

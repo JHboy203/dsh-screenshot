@@ -39,10 +39,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { lab } from './labpath.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.dirname(HERE)
-const LAB = path.join('D:\\信息库\\AI工作区', '.tmp-shot-lab', 'longshot')
+const LAB = lab('longshot')
 const BACKDROP = path.join(HERE, 'longshot-backdrop.ps1')
 const INFO = path.join(LAB, 'fixture-info.json')
 const FLOG = path.join(LAB, 'fixture.log')

@@ -35,11 +35,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { lab } from './labpath.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.dirname(HERE)
-const WORKSPACE = 'D:\\信息库\\AI工作区'
-const LAB = path.join(WORKSPACE, '.tmp-shot-lab', 'stitch-tex-probe')
+const LAB = lab('stitch-tex-probe')
 
 const shot = await import(pathToFileURL(path.join(PLUGIN, 'lib', 'shot.mjs')).href)
 const { capture, findPython, hitTest, lastJsonLine, run } = shot
