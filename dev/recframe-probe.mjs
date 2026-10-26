@@ -396,6 +396,56 @@ check(
 /** The frame-era measurement: the same ratio over the interior of a CROP-sized capture. */
 const patternStats = (image) => patternRatio(image, CROP, { x: PAD, y: PAD, w: REGION.w, h: REGION.h })
 
+/* ─────────────────── R65: 谁压在框上 ───────────────────
+ * 2026-10-25 的 `shot_gate({full:true})` 报了两条红：`bar(176,862) hwnd=18350338 want=50202112`
+ * 与 `border is drawn OUTSIDE ... {0,0,0,0}`，同一份代码单跑却是 18/0 全绿。真因不是框坏了，是聚合跑到
+ * 这里时有别的窗口压在框的上边框上（前一个探针的夹具没散场 / DSH 自己回到前台）。
+ * 判据原本只有"边框像素够不够"，于是"我的像素被盖住了"和"我根本没画"读成同一件事 —— 而处置方向正好相反。
+ * 现在覆盖敏感的断言都由 WindowFromPoint 定案：那个点上**确实属于框**才通过；属于**棋盘**（框不在那儿）
+ * 是产品回归；属于**第三个窗口**是环境挡住（退出码 2）。`shot.hitTest` 走常驻助手，12 个点 ~0.3 s。
+ */
+function barPoints() {
+	const R = REGION
+	const yT = R.y - 2
+	const yB = R.y + R.h + 1
+	const xL = R.x - 2
+	const xR = R.x + R.w + 1
+	const xs = [0.25, 0.5, 0.75].map((f) => R.x + Math.round(R.w * f))
+	const ys = [0.25, 0.5, 0.75].map((f) => R.y + Math.round(R.h * f))
+	return [...xs.map((x) => [x, yT]), ...xs.map((x) => [x, yB]), ...ys.map((y) => [xL, y]), ...ys.map((y) => [xR, y])]
+}
+
+/**
+ * 逐点问"这一点归谁"。`extra` 里的点（主判据那两个）也一起问，免得同一个问题问两遍。
+ * `only` 给了就只问这几个点（遮挡臂要快：框每 250 ms 自己重申一次 topmost，13 个点要 ~0.3 s，
+ * 取样跨过了它的重申就会读到框 —— 一次只问一个点才落在同一个状态里）。
+ * @returns {Promise<{pts:Array<{x:number,y:number,hwnd:number,kind:string,title:string}>, third:number}>}
+ */
+async function classifyCover(frameHwnd, extra = [], only = null) {
+	const wantFrame = Number(frameHwnd) || 0
+	const wantBackdrop = Number(bd?.hwnd) || 0
+	const pts = []
+	let third = 0
+	for (const [x, y] of only ?? [...barPoints(), ...extra]) {
+		const hit = await shot.hitTest(x, y)
+		const hwnd = Number(hit?.hwnd) || 0
+		const kind = hit?.ok !== true || hwnd === 0 ? 'unknown' : hwnd === wantFrame ? 'frame' : hwnd === wantBackdrop ? 'backdrop' : 'third'
+		if (kind === 'third') third += 1
+		pts.push({ x, y, hwnd, kind, title: String(hit?.title ?? '') })
+	}
+	return { pts, third }
+}
+
+/**
+ * 一条覆盖敏感断言该判成什么：'pass' | 'env' | 'fail'。
+ * env **只在**"那个点上确实是第三个窗口"时成立 —— 点上是棋盘（框根本不在那儿）仍然是产品回归。
+ * 这条区别就是这个函数存在的理由，所以它自己也被 arm 1b 反过来验一次。
+ */
+function coverVerdict(ok, thirdWindows) {
+	if (ok === true) return 'pass'
+	return Number(thirdWindows) > 0 ? 'env' : 'fail'
+}
+
 /* ─────────────────── arm 1: the frame on screen ─────────────────── */
 
 await sleep(300)
@@ -439,18 +489,34 @@ check('capture size matches the requested crop', img.width === CROP.w && img.hei
  * is not usable for this: windows.ps1 filters a 126x96 no-title tool window out, so listWindows
  * reported the frame as hwnd -1 (measured) and a z-order index never existed.
  * The pair is also the strongest statement about the window REGION: a point on a bar must hit the
- * frame, a point in the middle must fall through to whatever is behind it. */
-const barHit = await shot.hitTest(CROP.x + PAD + 20, CROP.y + PAD - 2)
-const midHit = await shot.hitTest(CROP.x + PAD + Math.round(REGION.w / 2), CROP.y + PAD + Math.round(REGION.h / 2))
+ * frame, a point in the middle must fall through to whatever is behind it.
+ * R65: the points are handed to classifyCover() as well, so every cover-sensitive check below can
+ * say "a THIRD window is on top there" (= environment, exit 2) instead of reporting a product
+ * regression -- the two readings are indistinguishable from pixels alone. */
+const BAR_PT = [CROP.x + PAD + 20, CROP.y + PAD - 2]
+const MID_PT = [CROP.x + PAD + Math.round(REGION.w / 2), CROP.y + PAD + Math.round(REGION.h / 2)]
+const barHit = await shot.hitTest(BAR_PT[0], BAR_PT[1])
+const midHit = await shot.hitTest(MID_PT[0], MID_PT[1])
+const cover = await classifyCover(frameInfo?.hwnd, [BAR_PT, MID_PT])
+const kindAt = (p) => cover.pts.find((q) => q.x === p[0] && q.y === p[1]) ?? { hwnd: 0, kind: 'unknown', title: '' }
+const barKind = kindAt(BAR_PT)
+const midKind = kindAt(MID_PT)
+const barOk = barHit.ok === true && Number(barHit.hwnd) === Number(frameInfo?.hwnd) && Number(frameInfo?.hwnd) > 0
+const barVerdict = coverVerdict(barOk, barKind.kind === 'third' ? 1 : 0)
 check(
 	'a point on the border bar belongs to the frame (topmost, and its region covers the bars)',
-	barHit.ok === true && Number(barHit.hwnd) === Number(frameInfo?.hwnd) && Number(frameInfo?.hwnd) > 0,
-	`bar(${CROP.x + PAD + 20},${CROP.y + PAD - 2}) hwnd=${barHit.hwnd} want=${String(frameInfo?.hwnd)} zpos=${String(frameInfo?.zpos)}`
+	barVerdict === 'pass',
+	`bar(${BAR_PT[0]},${BAR_PT[1]}) hwnd=${barHit.hwnd} want=${String(frameInfo?.hwnd)} zpos=${String(frameInfo?.zpos)}` +
+		(barVerdict === 'env' ? `（该点属于**第三个窗口** "${barKind.title}" 0x${barKind.hwnd.toString(16)} —— 框被盖住了，不是框没画）` : ''),
+	barVerdict === 'env' ? 'env' : undefined
 )
+const midOk = midHit.ok === true && Number(midHit.hwnd) === Number(bd.hwnd)
+const midVerdict = coverVerdict(midOk, midKind.kind === 'third' ? 1 : 0)
 check(
 	'a point in the middle falls THROUGH the frame to the backdrop (the region really removes it)',
-	midHit.ok === true && Number(midHit.hwnd) === Number(bd.hwnd),
-	`middle hwnd=${midHit.hwnd} want=${String(bd.hwnd)}`
+	midVerdict === 'pass',
+	`middle hwnd=${midHit.hwnd} want=${String(bd.hwnd)}` + (midVerdict === 'env' ? `（该点属于第三个窗口 "${midKind.title}"）` : ''),
+	midVerdict === 'env' ? 'env' : undefined
 )
 
 /* A wider shot is saved on every run: when a pixel assertion fails, this is the picture that
@@ -461,10 +527,15 @@ const b = bands()
 const isBorder = (c) => near(c, BORDER, 40)
 const counts = {}
 for (const [name, r] of Object.entries(b)) counts[name] = countIn(img, r[0], r[1], r[2], r[3], isBorder)
+const borderOk = Object.values(counts).every((n) => n >= REGION.w * 0.6 || n >= REGION.h * 0.6)
+const borderVerdict = coverVerdict(borderOk, cover.third)
 check(
 	'border is drawn OUTSIDE the captured rect on all four sides',
-	Object.values(counts).every((n) => n >= REGION.w * 0.6 || n >= REGION.h * 0.6),
-	JSON.stringify(counts) + ` (need >=60% of each side)`
+	borderVerdict === 'pass',
+	JSON.stringify(counts) +
+		` (need >=60% of each side)` +
+		(borderVerdict === 'env' ? `；${cover.third}/${cover.pts.length} 个边框取样点上是**别的窗口** —— 边框被盖住了，不是没画` : ''),
+	borderVerdict === 'env' ? 'env' : undefined
 )
 check(
 	'no border pixel INSIDE the captured rect',
@@ -479,6 +550,81 @@ check('interior is NOT key-coloured (no TransparencyKey leak)', keyPx <= 2, `mag
 /* the strongest statement, and since R53 it is deterministic: the interior still carries the
  * checkerboard the backdrop paints. Nothing about the desktop can influence this number. */
 const pat = patternStats(img)
+
+/* ─────────────────── arm 1b: 环境判据本身要被验过（R65） ───────────────────
+ * "被第三个窗口压住时判成 env" 这条路径在生产里只在聚合偶尔走到 —— 没被验过的判据等于没有，
+ * 而它的反面（把产品回归悄悄记成 env）**更贵**：那会掩盖真 bug。所以这一臂**故意**拿一个 TopMost
+ * 窗口（dev/recframe-control.ps1，就是 canary 那个）压在框的上边框上，然后同一套判据必须改口：
+ *   ① 边框那个取样点现在归**它**（说明真被压住了，不是我以为的）；
+ *   ② coverVerdict 对"边框像素 0 + 第三个窗口"给出 env；
+ *   ③ 控制臂：没有任何第三个窗口证据时必须给出 fail —— 否则这个函数只是常数 'env'；
+ *   ④ 拿掉遮挡之后，同一个点必须重新属于框（证明 ①② 的变化确实是它造成的）。
+ */
+const shadowInfo = path.join(LAB, 'shadow.json')
+try {
+	fs.rmSync(shadowInfo, { force: true })
+} catch {}
+const shadowLog = fs.openSync(path.join(LAB, 'shadow.log'), 'a')
+const shadow = spawn(
+	shot.findPowershell(),
+	[
+		'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'recframe-control.ps1'),
+		'-X', String(REGION.x - 6), '-Y', String(REGION.y - 10), '-W', String(REGION.w + 12), '-H', '10',
+		'-Seconds', '25', '-RaiseMs', '40', '-Info', shadowInfo,
+	],
+	{ windowsHide: false, stdio: ['ignore', shadowLog, shadowLog] }
+)
+try {
+	fs.closeSync(shadowLog)
+} catch {}
+shadow.unref()
+const shadowUp = await waitForFile(shadowInfo, 20_000)
+let shadowHwnd = 0
+try {
+	shadowHwnd = Number(JSON.parse(fs.readFileSync(shadowInfo, 'utf8')).hwnd) || 0
+} catch {}
+await sleep(400)
+/* 遮挡窗每 40 ms 抢一次 topmost，框每 250 ms 重申一次 —— 单次取样可能正好落在框重申之后。
+ * 所以按 40 ms 间隔采样、最多 20 次，只要**看到过**它就能证明"那个点可以被别人拿走"，
+ * 而 classifyCover 只问这一个点（~30 ms），落在同一个状态里。 */
+let coveredBar = null
+let samples = 0
+for (let i = 0; i < 20; i++) {
+	samples++
+	const one = await classifyCover(frameInfo?.hwnd, [], [BAR_PT])
+	const bar = one.pts[0]
+	if (bar.kind === 'third' && bar.hwnd === shadowHwnd) {
+		coveredBar = bar
+		break
+	}
+	await sleep(40)
+}
+check(
+	'SHADOW: a TopMost window that keeps re-asserting itself really takes the bar point',
+	shadowUp === true && shadowHwnd > 0 && coveredBar !== null && coveredBar.hwnd === shadowHwnd,
+	`shadow up=${shadowUp} hwnd=${shadowHwnd} · after ${samples} sample(s) the bar point is ${coveredBar === null ? 'still the frame' : `third (${coveredBar.hwnd} "${coveredBar.title}")`}`
+)
+const shadowVerdict = coverVerdict(false, coveredBar === null ? 0 : 1)
+check(
+	'SHADOW: the same "border pixels = 0" observation is classified ENV (not a product regression)',
+	shadowVerdict === 'env',
+	`verdict=${shadowVerdict}（点上确实是第三个窗口 → env）`
+)
+check(
+	'SHADOW control: with no third-window evidence the SAME function still says fail',
+	coverVerdict(false, 0) === 'fail',
+	`verdict=${coverVerdict(false, 0)}`
+)
+try {
+	shadow.kill()
+} catch {}
+await sleep(500)
+const restored = await shot.hitTest(BAR_PT[0], BAR_PT[1])
+check(
+	'SHADOW: once the blocker is gone that point belongs to the frame again',
+	restored.ok === true && Number(restored.hwnd) === Number(frameInfo?.hwnd),
+	`bar hwnd=${restored.hwnd} want=${String(frameInfo?.hwnd)} shadow=${shadowHwnd}`
+)
 
 /* ─────────────────── arm 2: the stop file ─────────────────── */
 
@@ -505,15 +651,21 @@ try {
 const interiorRatio = interiorDiff(before.img, img).ratio
 const patBefore = patternStats(before.img)
 const patAfter = afterImg === null ? null : patternStats(afterImg)
+/* R65：这两条看的是「on 那张抓图里我的棋盘还在不在」。同一张图上的覆盖问题由 midKind 说明 ——
+ * 中心点上是**别的窗口**时，棋盘读不出来是环境；中心点是棋盘时读不出来才是产品/夹具真红。 */
+const patVerdict = coverVerdict(pat.ratio >= 0.995, midKind.kind === 'third' ? 1 : 0)
+const interiorVerdict = coverVerdict(interiorRatio >= 0.95, midKind.kind === 'third' ? 1 : 0)
 check(
 	'interior still shows the BACKDROP checkerboard (>=99.5% of pixels at the expected colour)',
-	pat.ratio >= 0.995,
-	`${(pat.ratio * 100).toFixed(2)}% of ${pat.total} px match` + (pat.ratio >= 0.995 ? '' : `；框没画上来时（before）是 ${(patBefore.ratio * 100).toFixed(2)}%`)
+	patVerdict === 'pass',
+	`${(pat.ratio * 100).toFixed(2)}% of ${pat.total} px match` + (pat.ratio >= 0.995 ? '' : `；框没画上来时（before）是 ${(patBefore.ratio * 100).toFixed(2)}%`) + (patVerdict === 'env' ? `；中心点上第三个窗口 "${midKind.title}" —— 棋盘被盖住` : ''),
+	patVerdict === 'env' ? 'env' : undefined
 )
 check(
 	'interior is unchanged while the frame is up (>=95% pixels)',
-	interiorRatio >= 0.95,
-	`${(interiorRatio * 100).toFixed(2)}% unchanged of ${interiorDiff(before.img, img).total}`
+	interiorVerdict === 'pass',
+	`${(interiorRatio * 100).toFixed(2)}% unchanged of ${interiorDiff(before.img, img).total}` + (interiorVerdict === 'env' ? `；中心点上第三个窗口 "${midKind.title}"` : ''),
+	interiorVerdict === 'env' ? 'env' : undefined
 )
 check(
 	'the backdrop is intact again after the frame closes',

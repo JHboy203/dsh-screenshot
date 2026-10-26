@@ -20,6 +20,11 @@
 //                                    and everything OUTSIDE the block's columns is pixel-identical
 //   dup     like anim + one frame where nothing scrolled -> that frame is skipped (offset 0)
 //   gap     two frames farther apart than one frame height -> refused (exit 3, no output file)
+//   tight   scroll, but the overlap is only 25 % of the frame (R65)
+//                                 -> still every offset exact; a repeated band on the page must not
+//                                    win over the widest exact candidate
+//   tightanim  a narrow overlap AND the block repainting inside the overlapping band (R65)
+//                                 -> refused (exit 3, no output file): no evidence left, never guess
 //
 // RUN IT FROM THE HOST (it spawns python + captures the screen):
 //   shot_probe({probe:'stitch-tex'})        or
@@ -89,10 +94,15 @@ const screen = path.join(LAB, 'screen.png')
 fs.copyFileSync(cap.path, screen)
 check('a real screen capture is the texture source', fs.statSync(screen).size > 100_000, { bytes: fs.statSync(screen).size, screen: [cap.width, cap.height] })
 
-/** Build one replay mode's fixture and stitch it. Returns { truth, result, outFile }. */
-async function arm(mode) {
-	const dir = path.join(LAB, mode)
-	const build = await py3(REPLAY, ['build', '--src', screen, '--out', dir, '--mode', mode, '--frames', String(FRAMES), '--shift', String(SHIFT)])
+/** Build one replay mode's fixture and stitch it. Returns { truth, result, outFile, dir }. */
+async function arm(mode, opts = {}) {
+	const shift = Number(opts.shift ?? SHIFT)
+	const frames = Number(opts.frames ?? FRAMES)
+	const height = Number(opts.height ?? 520)
+	const dir = path.join(LAB, opts.dir ?? mode)
+	const extra = []
+	if (opts.patchY !== undefined) extra.push('--patch-y', String(opts.patchY))
+	const build = await py3(REPLAY, ['build', '--src', screen, '--out', dir, '--mode', mode, '--frames', String(frames), '--shift', String(shift), '--height', String(height), ...extra])
 	if (build.code === 4 && build.json && build.json.error === 'flat-source') {
 		envBlocked('the screen has no dense texture right now', build.json)
 	}
@@ -104,7 +114,7 @@ async function arm(mode) {
 		return { truth: null, result: null, outFile: null }
 	}
 	const truth = JSON.parse(fs.readFileSync(path.join(dir, 'truth.json'), 'utf8'))
-	check(`${mode}: fixture built from real texture`, truth.frames.length === (mode === 'gap' ? 2 : FRAMES) && truth.density >= 120, { frames: truth.frames.length, width: truth.width, slices: truth.slices, density: truth.density })
+	check(`${mode}: fixture built from real texture`, truth.frames.length === (mode === 'gap' ? 2 : frames) && truth.density >= 120, { frames: truth.frames.length, width: truth.width, slices: truth.slices, density: truth.density, shift: truth.shift })
 	const outFile = path.join(dir, 'out.png')
 	if (fs.existsSync(outFile)) fs.unlinkSync(outFile)
 	const res = await py3(PY, ['--out', outFile, '--overlap-min', '40', ...truth.frames])
@@ -175,6 +185,48 @@ async function compare(dir, outFile, maxY, dropCols) {
 		check('gap: refused (exit 3), never guessed into a picture', result.code === 3, { code: result.code })
 		check('gap: no output file was written', outFile === null || !fs.existsSync(outFile), { out: outFile })
 		check('gap: the error is a machine-readable no-overlap', /"error":\s*"no-overlap"/.test(result.stderr), { stderr: result.stderr.split('\n').pop() })
+	}
+}
+
+// 6. tight -- the overlap is only 25 % of the frame: an application that scrolls a page at a time
+//    minus a line. R64 left this as "only ever measured on synthetic replay", and on REAL texture
+//    it failed within minutes: pair 7 had two pixel-exact candidates (truth 390 with 130 rows of
+//    evidence, and 477 with 43 rows because 43 rows of the PAGE repeat) and the coarse pass
+//    preferred the narrow one -- height 4117 instead of 4030, 243 523 wrong pixels, no error
+//    anywhere. py/stitch.py#find_exact_shift is the fix; this arm is what keeps it honest.
+{
+	const TIGHT = { shift: 390, frames: 10, height: 520, dir: 'tight' }
+	const share = (TIGHT.height - TIGHT.shift) / TIGHT.height
+	check('tight: the fixture really is a NARROW overlap (< 35 % of the frame)', share < 0.35, { share: Math.round(share * 1000) / 1000, overlapRows: TIGHT.height - TIGHT.shift })
+	const { truth, result, outFile, dir } = await arm('scroll', TIGHT)
+	if (truth && result) {
+		const r = result.json || {}
+		check('tight: the capture still succeeds', result.code === 0 && result.json !== null, { code: result.code, stderr: result.stderr.slice(0, 300) })
+		check(
+			'tight: every offset is exactly the truth (a repeated band must not win over the widest exact candidate)',
+			Array.isArray(r.offsets) && r.offsets.length === TIGHT.frames - 1 && r.offsets.every((s) => s === TIGHT.shift),
+			{ offsets: r.offsets, truth: TIGHT.shift }
+		)
+		check('tight: height is exactly the page height', r.height === truth.total, { got: r.height, want: truth.total })
+		const cmp = await compare(dir, outFile, truth.total)
+		check('tight: the stitched picture is PIXEL-IDENTICAL to the page', cmp.json && cmp.json.same === true, cmp.json || { code: cmp.code })
+	}
+}
+
+// 7. tightanim -- a narrow overlap AND the block repainting INSIDE the overlapping band (the patch
+//    sits on the bottom 130 rows, which is exactly the overlap at a 390 px shift). Nothing in that
+//    band can be evidence: the true shift scores ~38 there, and the structural search deliberately
+//    refuses to look at overlaps under 35 % (11 rows of dense text once satisfied it and picked a
+//    wrong 509 px -- see MIN_OVERLAP_SHARE). The only honest answer is a refusal.
+//    Measured: 37.98 > 8.00 -> exit 3, no file.
+{
+	const TIGHTANIM = { shift: 390, frames: 6, height: 520, dir: 'tightanim', patchY: 390 }
+	const { truth, result, outFile } = await arm('anim', TIGHTANIM)
+	if (truth && result) {
+		check('tightanim: the block really sits inside the overlapping band', truth.patch.y < TIGHTANIM.height && truth.patch.y + truth.patch.h >= TIGHTANIM.shift, { patch: truth.patch, overlapFrom: TIGHTANIM.shift })
+		check('tightanim: refused (exit 3) instead of inventing a seam from an animating band', result.code === 3, { code: result.code, stderr: result.stderr.split('\n')[0] })
+		check('tightanim: no output file was written', outFile === null || !fs.existsSync(outFile), { out: outFile })
+		check('tightanim: the error says no-overlap (machine readable)', /"error":\s*"no-overlap"/.test(result.stderr), { stderr: result.stderr.split('\n').pop() })
 	}
 }
 

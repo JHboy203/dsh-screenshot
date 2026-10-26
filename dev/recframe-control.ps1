@@ -18,6 +18,14 @@ param(
   [int]$W = 240,
   [int]$H = 120,
   [int]$Seconds = 25,
+  # R65: re-assert "top of the topmost band" every N ms. 0 = never (the plain canary).
+  # WHY: ps/recframe.ps1 re-raises ITSELF every 250 ms on purpose (R55), so a competitor that raises
+  # once in Shown is pushed back down within a quarter second and the probe's hit test then reports
+  # the frame -- measured: a one-shot TopMost window on the bar lost to the frame every time.
+  # A fixture that wants to model "something above us" has to keep raising, which is also what the
+  # real 2026-10-24 aggregate failure looked like (border 0/0/0/0 while another window kept coming
+  # forward). 30-60 ms beats the frame's 250 ms tick.
+  [int]$RaiseMs = 0,
   [string]$Info = ''
 )
 
@@ -32,6 +40,7 @@ public class DshFrameCanary {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool on);
@@ -79,6 +88,15 @@ $f.Add_Shown({
   $t.Interval = [Math]::Max(1000, $Seconds * 1000)
   $t.Add_Tick({ $t.Stop(); $f.Close() })
   $t.Start()
+  # R65: optional "keep stealing the top of the topmost band" (SWP_NOSIZE|NOMOVE|NOACTIVATE).
+  if ($RaiseMs -gt 0) {
+    $rt = New-Object System.Windows.Forms.Timer
+    $rt.Interval = [Math]::Max(20, $RaiseMs)
+    $rt.Add_Tick({
+      try { [void][DshFrameCanary]::SetWindowPos($f.Handle, [IntPtr](-1), 0, 0, 0, 0, 0x0001 -bor 0x0002 -bor 0x0010) } catch {}
+    })
+    $rt.Start()
+  }
 })
 
 [void]$f.ShowDialog()

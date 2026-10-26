@@ -156,7 +156,7 @@ to verify both halves, "hide" and "restore"; it also proves that restoring **doe
 a maximized window back into a normal-sized one).
 
 ```
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 18 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint)
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/recframe-probe.mjs'})         # 22 checks: pixel-level proof that the recording frame is on screen (R53 known checkerboard, R55 self-locating + WindowFromPoint, **R65 tells "covered by another window" (env) from "never painted" (regression)**, verified by a deliberately covering arm)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/record-integrity-probe.mjs'})  # 9 checks: **what lands in the file** (records 2.5 s, extracts a frame: 0 red pixels, brightness within 8 %, both tones present)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-probe.mjs'})         # 81 checks: **the stitched long image itself** (numbered luma-band fixture; auto / manual / **scrollbar-visible** / **3840 px tall page** / **animated region** arms: band order / each exactly once / every band its own height / where the content ends; plus a negative arm: frames that do not overlap must be reported, never stitched) — 166 s
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
@@ -166,7 +166,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
                 args:['run','40','1','90','14']})                                  # lab: one auto session while a block inside the region repaints every 90 ms (the R61 case)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 25 checks: **the stitcher on REAL page texture** (real screen capture -> synthetic long page -> known frames -> compared with the truth pixel by pixel): plain scroll / animated block / motionless duplicate frame / a jump too far — 15 s (R63). Exits 2 (env) when the session is locked or the screen has no DISTINCT texture — not a regression
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 checks: **the stitcher on REAL page texture** (real screen capture -> synthetic long page -> known frames -> compared with the truth pixel by pixel): plain scroll / animated block / motionless duplicate frame / a jump too far / **narrow 25 % overlap** / **narrow overlap with animation inside the band** — ~35 s (R63; the last two since R65). Exits 2 (env) when the session is locked or the screen has no DISTINCT texture — not a regression
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ocr-probe.mjs'})              # 29 checks: **OCR end to end** (node renders known text -> lib/shot.mjs#ocr()): white page of three lines / dark theme / degraded 11 px / blank page is not an error / only inside the rect — 17 s (R63)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -454,14 +454,25 @@ Equivalent offline way: append the `insert` line from this repo's `cordis.patch.
 - **A narrow overlap is not evidence** (R63): 27 rows of real text can agree by accident (mean residual **2.37**) and quietly double 256 rows. Below 35 % of the
   frame height, only a **pixel-exact** match (residual <= 1.0) counts — the band fixture really does scroll 75 % per notch and is exact at 0.00 every time, so honest
   captures are not caught by this.
+- **A narrow overlap can be "exact" and still be the wrong seam** (R65, a real bug found on real texture): on a page-at-a-time app (25 % overlap) one frame pair
+  had TWO pixel-exact candidates — the truth at 390 (130 rows of evidence) and 477 (43 rows, because 43 rows of the page repeat 87 px apart). The coarse pass
+  preferred 477 (at a 2.6:1 downscale those 43 rows are 16 signature rows that agree perfectly, while 390 does not land on a signature row at all) and the old
+  rule accepted it as "exact" → height 4117 instead of 4030 (**silently +87 px**, 243 523 wrong pixels). Narrow overlaps are now **re-decided**: deepest minimum
+  first, widest overlap on a tie (`py/stitch.py#find_exact_shift`). Same fixture: 4117 → **4030 and pixel-identical**.
+  The other half is measured too: a 4 px-short seam (386) that also sat inside the tolerance is caught by the same rule, because it is not the deepest minimum.
+- **Narrow overlap + something repainting inside the overlapping band = an honest refusal** (R65): with a 25 % overlap and the repainting block on that band there
+  is no usable evidence left (residual 37.98 > 8.00 at the truth), and the structural criterion deliberately ignores overlaps below 35 % (R63: 11 rows of text
+  satisfied it once and picked a wrong 509 px). So it reports `no-overlap`, exits 3 and writes **no file** instead of a plausible wrong picture. The auto loop
+  steps ~45 % of the region height, so it does not normally reach this; when it happens the advice is "scroll in smaller steps".
 - A motionless duplicate frame is still decided **before** any stitching; getting the order wrong pushes such a frame in at a guessed offset — measured in R63 as
   **158 px** of doubled content on the animated band arm.
   **Known boundary**: the repainting block leaves a ghost in the picture (each frame pasted its own copy) — unavoidable when stitching; the auto loop also cannot
   recognise "the bottom" in that situation (the frame never stops changing), so it runs to the frame cap and honestly reports `max-frames` ("the bottom may be
   missing") — the picture itself is complete.
-- The claims above now have their own probe on **real texture** (R63): `dev/texreplay.py` turns one real screen capture into a long page and cuts known frames;
-  four arms assert "every offset exact / the result is pixel-identical to the truth (outside the animated block's columns) / the motionless frame is skipped /
-  a jump too far must be refused". It found two real bugs the first time it ran (the two ⚠️ points above).
+- The claims above now have their own probe on **real texture** (R63; six arms since R65): `dev/texreplay.py` turns one real screen capture into a long page and
+  cuts known frames; the arms assert "every offset exact / the result is pixel-identical to the truth (outside the animated block's columns) / the motionless frame
+  is skipped / a jump too far must be refused / a narrow overlap is still exact / a narrow overlap with animation is refused". It found two real bugs the first time
+  it ran (the two ⚠️ points above) and a **third** one when the narrow-overlap arms were added in R65 (+87 px above).
 - Before touching the stitcher, run `texreplay.py landscape` (R64): it prints **the top candidates of every scorer** next to **the four numbers
   at the true shift** (`python dev/texreplay.py landscape --dir <built dir> --pair <k>`). None of the four R63 bugs was visible from the product
   JSON — every scorer reports "a number". Measured on real texture (truth 237): on a plain scroll the truth is the only 0.00 and the structural

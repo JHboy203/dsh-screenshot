@@ -98,7 +98,11 @@ check('DSH window was not minimized', after !== null && after.min !== true, { mi
 check(
 	'the restore kept its geometry (no un-maximize / move)',
 	before !== null && after !== null && before.x === after.x && before.y === after.y && before.w === after.w && before.h === after.h,
-	before === null || after === null ? {} : { before: [before.x, before.y, before.w, before.h], after: [after.x, after.y, after.w, after.h] }
+	/* R65: 也报 hwnd。2026-10-26 的 full 聚合里这一条红过一次（before x=119 → after x=32，尺寸一模一样），
+	 * 单跑两次都是绿的、窗口位置也已经是 32 —— 只有 hwnd 能区分"同一个窗口被挪了"和"这一读读到了另一个
+	 * 同尺寸窗口"（本机桌面上确实同时存在多个 Chrome_WidgetWin_1）。加它不是诊断洁癖：
+	 * 下次红的时候要能直接判，而不是重跑一遍看它变绿。 */
+	before === null || after === null ? {} : { before: [before.x, before.y, before.w, before.h], after: [after.x, after.y, after.w, after.h], hwnd: [before.hwnd, after.hwnd] }
 )
 
 // 3. A title that matches nothing must not break the capture (hiding is a convenience).

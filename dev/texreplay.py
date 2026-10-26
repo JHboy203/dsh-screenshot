@@ -2,7 +2,7 @@
 """Build a LONG PAGE out of a REAL screen capture, then cut known frames from it (R63).
 
     python dev/texreplay.py build --src screen.png --out <dir> --mode scroll|anim|dup|gap
-           [--width 660] [--height 520] [--shift 237] [--frames 10] [--seed 7]
+           [--width 660] [--height 520] [--shift 237] [--frames 10] [--seed 7] [--patch-y 250]
     python dev/texreplay.py compare --a out.png --b page.png --max-y 2653 [--drop-cols 360,620]
 
 WHY THIS EXISTS
@@ -197,13 +197,14 @@ def cmd_build(argv):
         "frames": 10,
         "seed": 7,
         "slices": "distinct",
+        "patch_y": 250,
     }
     i = 0
     while i < len(argv):
         a = argv[i]
         if a.startswith("--"):
             key = a[2:].replace("-", "_")
-            if key in ("width", "height", "shift", "frames", "seed"):
+            if key in ("width", "height", "shift", "frames", "seed", "patch_y"):
                 i += 1
                 args[key] = int(argv[i])
             elif key in ("src", "out", "mode", "slices"):
@@ -267,7 +268,7 @@ def cmd_build(argv):
     page_path = os.path.join(args["out"], "page.png")
     page.save(page_path)
 
-    patch = {"x": max(20, min(380, width - 240)), "y": 250, "w": 220, "h": 130}
+    patch = {"x": max(20, min(380, width - 240)), "y": max(0, min(height - 130, args["patch_y"])), "w": 220, "h": 130}
     animated = mode in ("anim", "dup") or (mode == "gap" and True)
     files = []
     for k in range(n):

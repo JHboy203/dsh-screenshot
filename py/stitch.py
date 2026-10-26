@@ -180,6 +180,15 @@ COVER_MIN_FILL = 0.3
 # fallback, which insists on this share; if that finds nothing, the refusal is honest.
 MIN_OVERLAP_SHARE = 0.35
 
+# R65: how much worse a candidate may be and still count as "equally good evidence" when the search
+# has to choose between an exact narrow overlap and an exact wide one.
+# Measured on dense texture (dev/texreplay.py, 360x520, truth 390, 130 rows of overlap):
+#     truth 390 -> 0.00;  389 / 391 / 392 / 393 / 394 -> 0.24-0.25  (one 0.8 %-area edge artifact)
+# A narrow band of the page repeating 87 px away -> 0.00 as well.
+# So: eps must be BELOW 0.24 (otherwise the neighbours, which the scan meets first, would win over
+# the truth) and ABOVE 0 (otherwise the repeated band, which ties at 0.00, would win on scan order).
+EXACT_EPS = 0.1
+
 
 def covered_change(a, b, tol=COVER_TOL, max_area=COVER_MAX_AREA, min_fill=COVER_MIN_FILL):
     """True when the two frames agree EXCEPT inside one compact region (an animating block).
@@ -266,6 +275,54 @@ def find_covered_shift(prev_l, cur_l, overlap_min):
     if best is None:
         return h, float("inf")
     return best, float(best_score)
+
+
+def find_exact_shift(prev_l, cur_l, overlap_min, eps=EXACT_EPS):
+    """The shift that matches BEST, ties broken towards the WIDEST overlap, or (height, inf) (R65).
+
+    Why this exists -- measured on real page texture (dev/texreplay.py, 10 frames scrolling 390 px
+    with a 520 px frame, i.e. a 25 % overlap, TRUE shift 390):
+
+        pair 7 had TWO pixel-exact candidates: the truth at 390 (130 rows of evidence) and 477
+        (43 rows), because 43 rows of the PAGE itself repeat 87 px apart. The coarse pass preferred
+        477 -- at a 2.6:1 width downscale those 43 real rows are 16 signature rows that agree
+        perfectly, while the true 390 does not land on a signature row at all -- and the narrow
+        path then accepted it as "exact" (0.00 <= DUP_TOL). Result: one seam of 477, height 4117
+        instead of 4030 (+87 px) and 243 523 wrong pixels, silently.
+
+    The rule this encodes: a narrow overlap is only evidence when it is EXACT (R63), and among
+    candidates that are exact, the one with MORE rows agreeing is the better evidence. Two details
+    are both measured, not stylistic:
+      * ties are decided by overlap WIDTH only within `eps` -- taking "the first candidate under
+        DUP_TOL" instead returned 386 on another pair, because 389..394 all sit at 0.24 (a 4 px
+        short seam, height 4026 instead of 4030): the exact one is the DEEPEST minimum, not the
+        first one inside tolerance;
+      * the scan runs from the widest overlap, so a repeated band at a larger shift (less evidence)
+        can never displace a genuine tie at a smaller one.
+    It cannot pick a wrong WIDE candidate: a false match over hundreds of dense rows does not
+    happen (R63 measurements: wrong shifts sit at 1.00+, truth at 0.00).
+
+    Cost: one full-resolution pass, ~0.2 s at 420x520, and only for pairs whose best plain match
+    is a narrow overlap (an app that scrolls more than 65 % of the frame per step).
+    """
+    w, h = prev_l.size
+    best_s = None
+    best_d = None
+    floor = None
+    for s in range(max(2, overlap_min), max(3, h - 8)):
+        a = prev_l.crop((0, s, w, h))
+        b = cur_l.crop((0, 0, w, h - s))
+        if a.size[1] < 8:
+            break
+        diff = mean_abs_diff(a, b)
+        if floor is None or diff < floor:
+            floor = diff
+        # Clearly better -> take it. Within eps -> keep the wider overlap already seen.
+        if best_d is None or diff < best_d - eps:
+            best_s, best_d = s, diff
+    if best_s is None or floor is None or floor > DUP_TOL or best_d > DUP_TOL:
+        return h, float("inf")
+    return best_s, best_d
 
 
 def refine_shift(prev_l, cur_l, guess, radius):
@@ -378,6 +435,17 @@ def main(argv):
             #      shift and the stitcher doubled 256 rows): a sliver proves a seam only when it
             #      matches EXACTLY, because the band fixture really does scroll 75 % per step.
             # Both are handed to the structural search instead of being trusted or refused outright.
+            #
+            # R65 adds a third: on a NARROW overlap the candidate can be pixel-exact and still be
+            # the wrong seam, because the page itself repeats (measured: truth 390 with 130 rows of
+            # evidence vs a 43-row repeat at 477, both 0.00 -> the coarse pass preferred 477 and the
+            # picture grew by 87 px). Worse, on another pair the same "exact" tolerance accepted a
+            # 4 px short seam (386; height 4026 instead of 4030). So a narrow match is re-decided by
+            # find_exact_shift: deepest minimum first, widest overlap on a tie.
+            if (height - s) < MIN_OVERLAP_SHARE * height:
+                s_exact, p_exact = find_exact_shift(loupe[k - 1], loupe[k], overlap_min)
+                if p_exact <= DUP_TOL:
+                    s, precise = s_exact, p_exact
             narrow = (height - s) < MIN_OVERLAP_SHARE * height and precise > DUP_TOL
             if precise > MATCH_TOL or narrow:
                 s2, p2 = find_covered_shift(loupe[k - 1], loupe[k], overlap_min)
