@@ -333,6 +333,12 @@ public class DshOverlayForm : Form {
   public Rectangle Selection { get { return sel; } }
   public int Phase { get { return phase; } }
   public int ShapeCount { get { return shapes.Count; } }
+  // R66: what the self test's "selection near the bottom" dump measured, so the layout rule
+  // ("no room below -> the card goes above the selection") is assertable, not just viewable.
+  public Rectangle FlipBar = Rectangle.Empty;
+  public bool FlipAbove = false;
+  public int BarWidthPublic { get { return BarWidth(); } }
+  public int BarHeightPublic { get { return BarHeight(); } }
 
   // Opaque + AllPaintingInWmPaint already skip this; the background fill is exactly
   // what produced the flicker, so keep it a hard no-op.
@@ -1195,6 +1201,8 @@ public class DshOverlayForm : Form {
     if (FormShotPath != null && FormShotPath.Length > 0) {
       hoverBtn = 2;
       SetSel(new Rectangle(200, this.ClientSize.Height - 170, 320, 120));
+      FlipBar = ToolbarRect();
+      FlipAbove = FlipBar.Height > 0 && FlipBar.Bottom <= sel.Top;
       DumpForm(".flip");
       hoverBtn = -1;
       SetSel(new Rectangle(200, 150, 320, 240));
@@ -1471,6 +1479,13 @@ while ($true) {
     Restore-SelfWindow -ToFront
     $res.repaint = [int]$form.Repaints
     $res.shapes = [int]$form.ShapeCount
+    # R66: the self test leaves a "selection near the bottom" measurement behind, so the caller
+    # can assert the layout RULE (card flips above the selection) instead of only eyeballing the
+    # rendered PNG. Reported as numbers; 0/0 when no self test ran.
+    $fb = $form.FlipBar
+    $res.flipBar = @{ x = [int]$fb.X; y = [int]$fb.Y; w = [int]$fb.Width; h = [int]$fb.Height }
+    $res.flipAbove = [bool]$form.FlipAbove
+    $res.barSize = @{ w = [int]$form.BarWidthPublic; h = [int]$form.BarHeightPublic }
 
     if ($form.RegionPicked) {
       # Region-only: hand back the rectangle. Deliberately no Clipboard::SetImage and no

@@ -106,6 +106,17 @@ async function main() {
 	else check('clipboard took it', res.clip === true, { clip: res.clip, clipError: res.clipError })
 	check('labels reached the form', Number(res.labelsCount) === 9, { labelsCount: res.labelsCount })
 
+	// R66：卡片"翻到选区上方"这条**规则**现在有数字断言（.flip 那张图是给人看的，判绿要有数）。
+	// 判据来自窗体自己报的 ToolbarRect：卡片底边不越过选区顶边，且整张卡片还在屏幕内。
+	{
+		const fb = res.flipBar || {}
+		const bar = res.barSize || {}
+		const screenH = Number(res.screenH) || 1080
+		check('flip: the card sits entirely ABOVE a bottom selection', res.flipAbove === true, { flipAbove: res.flipAbove, flipBar: fb })
+		check('flip: the card stayed on screen', Number(fb.y) >= 0 && Number(fb.y) + Number(fb.h) <= screenH, { y: fb.y, h: fb.h, screenH })
+		check('R66 card is the skinned size (3 rows tall, not the old 26 px strip)', Number(bar.w) > 300 && Number(bar.h) >= 60 && Number(bar.h) <= 120, { bar })
+	}
+
 	if (fs.existsSync(png)) {
 		// 确定性校验，别用"文件够不够大"这种启发式：底色单一的区域压出来只有 4-5KB 是正常的。
 		const buf = fs.readFileSync(png)

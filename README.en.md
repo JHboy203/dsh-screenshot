@@ -139,7 +139,7 @@ child process because those scripts call `process.exit()`.
 `{dryRun:false}` really commits and pushes. It refuses to commit when the selftests are red.
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 604 checks: files / manifests / both-side contracts / overlay / wiring / PowerShell static checks / host loadability
+node .tools/dsh-shot-smoke.mjs          # 611 checks: files / manifests / both-side contracts / overlay / wiring / PowerShell static checks / host loadability
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
@@ -175,7 +175,10 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 checks: **the stitcher on REAL page texture** (real screen capture -> synthetic long page -> known frames -> compared with the truth pixel by pixel): plain scroll / animated block / motionless duplicate frame / a jump too far / **narrow 25 % overlap** / **narrow overlap with animation inside the band** — ~35 s (R63; the last two since R65). Exits 2 (env) when the session is locked or the screen has no DISTINCT texture — not a regression
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ocr-probe.mjs'})              # 29 checks: **OCR end to end** (node renders known text -> lib/shot.mjs#ocr()): white page of three lines / dark theme / degraded 11 px / blank page is not an error / only inside the rect — 17 s (R63)
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库自检（1 秒，确定性）
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 checks: pixel library / probe library / list metadata (1 s, deterministic)
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-selftest.mjs'})           # 34 checks: **overlay end to end** (real pick -> annotate -> render -> clipboard/file -> regionOnly -> pin) and it renders the whole form to form.select/.annotate/.flip.png (R66: the last one is "selection at the bottom -> the card flips ABOVE it, one button hovered", and flipBar/flipAbove are **numeric assertions**), ~22 s
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-skin-shot.mjs',
+                args:['--dir','<that DSH_OVERLAY_DIR>']})                          # **render -> crop -> zoom** (R66): the card / size badge / magnifier rectangles are COMPUTED from the paint constants, four zoomed PNGs in one go (zoom/bar|flip|badge|loupe.png, 3x, NEAREST), 1 s
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',

@@ -133,7 +133,7 @@ shot_gate({full:true, host:true})   # 再加宿主全量（≈10 分钟）
 确认后 `{dryRun:false}` 才真的提交推送；自检红了它**不会**提交。
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 607 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 611 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
@@ -169,6 +169,9 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
                 args:['run','40','1','90','14']})                                  # 实验台：区域里有东西每 90ms 重画时跑一次 auto（R61 那个场景）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # 排障用（不是探针、`dev/_*` 不入库）：跑一次会话并留下所有帧，逐对打印"真实位移 vs 拼接器报的偏移"
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-selftest.mjs'})           # 34 项：**覆盖层端到端**（真实框选 → 标注 → 渲染 → 剪贴板/落盘 → regionOnly → 贴图），并把整个窗体渲染成 form.select/.annotate/.flip.png（R66：最后一张是"选区贴底 → 卡片翻到上方 + hover 态"，且 flipBar/flipAbove 是**数字断言**），约 22 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-skin-shot.mjs',
+                args:['--dir','<上面那个 DSH_OVERLAY_DIR>']})                      # **渲染 → 裁图 → 放大**（R66）：从 paint 代码的常量**算**出卡片/角标/放大镜的矩形，一次出 zoom/bar|flip|badge|loupe.png（3 倍，NEAREST），1 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 项：**拼接器在真实页面纹理上**（真截屏 → 造长页面 → 切已知帧 → 与真值逐像素比）：滚动 / 区域里有动画 / 同位置重复帧 / 跳太远 / **窄重叠（25%）** / **窄重叠且动画压在重叠带里**，约 35 秒（R63 起；R65 加后两条）。锁屏或屏幕上没有**互不相同**的纹理时**退 2**（env），不是回归
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ocr-probe.mjs'})              # 29 项：**OCR 端到端**（node 渲染已知文字 → lib/shot.mjs#ocr()）：白底三行 / 深色主题 / 11px 降级 / 空白不报错 / 只认矩形内，约 17 秒（R63）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
