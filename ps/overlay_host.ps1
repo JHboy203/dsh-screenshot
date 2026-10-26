@@ -254,9 +254,40 @@ public class DshOverlayForm : Form {
   public bool RegionOnly = false;
   public bool RegionPicked = false;
 
-  private const int BtnW = 64;
-  private const int BtnH = 26;
-  private const int BtnGap = 6;
+  // ---- toolbar skin (R66) ----------------------------------------------------
+  // Before: nine 64x26 flat rectangles with text labels and no state of their own.
+  // That read like a debug strip (the user asked for a cosmetic pass), and it was
+  // 624 px wide so it covered whatever it floated over. Now it is one rounded card:
+  //   [icon + caption] x9, with a hover state, a filled pill for the active tool,
+  //   group separators, and the shortcut line INSIDE the card (it used to be a
+  //   floating white string under the bar, which was the ugliest part).
+  // 44x46 keeps the three-glyph CJK captions (ma-sai-ke) on one line at 8 pt; icons
+  // are drawn on a 20x20 grid so a DPI change only scales the box, not the design.
+  // NOTE: no CJK in this file -- it must stay ASCII (PS 5.1 decodes BOM-less UTF-8
+  // as ANSI and swallows code lines); captions arrive from the client as Labels.
+  private const int BtnW = 44;
+  private const int BtnH = 46;
+  private const int BtnGap = 4;
+  private const int BarPad = 6;
+  private const int SepSlot = 9;      // slot reserved for a group separator
+  private const int IconBox = 20;
+  private const int HintRow = 20;
+
+  private int hoverBtn = -1;
+  // Last card rectangle actually painted: the card sits 10..92 px outside the
+  // selection, so invalidating only Grow(sel) would leave trails when the selection
+  // moves. Union of old + new is what repaints it.
+  private Rectangle lastCard = Rectangle.Empty;
+
+  private readonly Font capFont = new Font("Microsoft YaHei UI", 8.5f);
+  private readonly Font capFontMin = new Font("Microsoft YaHei UI", 7f);
+  private readonly Font hintFont = new Font("Microsoft YaHei UI", 8.5f);
+  private readonly Font hintFontMin = new Font("Microsoft YaHei UI", 7.5f);
+  private static readonly Color CardBg = Color.FromArgb(243, 28, 28, 34);
+  private static readonly Color CardEdge = Color.FromArgb(40, 255, 255, 255);
+  private static readonly Color InkDim = Color.FromArgb(150, 255, 255, 255);
+  private static readonly Color HoverFill = Color.FromArgb(28, 255, 255, 255);
+  private static readonly Color SepInk = Color.FromArgb(30, 255, 255, 255);
 
   private Rectangle sel = Rectangle.Empty;
   private Rectangle prevSel = Rectangle.Empty;
@@ -267,7 +298,6 @@ public class DshOverlayForm : Form {
   private DshShape cur = null;
   private Point downPt;
   private bool dragging = false;
-  private readonly Font uiFont = new Font("Microsoft YaHei UI", 9f);
   private readonly Font labelFont = new Font("Consolas", 11f);
   private readonly Font textFont = new Font("Microsoft YaHei UI", 16f);
 
@@ -310,7 +340,10 @@ public class DshOverlayForm : Form {
 
   private static Rectangle Grow(Rectangle r) {
     if (r.Width <= 0 || r.Height <= 0) return Rectangle.Empty;
-    return Rectangle.Inflate(r, 8, 40);        // 2px border + the toolbar strip
+    // 2px border + the size badge. The toolbar card is NOT inside this margin any more
+    // (it can sit ~96 px below the selection and is 458 px wide), so it is invalidated
+    // through InvalidateToolbar() instead -- see SetSel below.
+    return Rectangle.Inflate(r, 8, 40);
   }
 
   private void InvalidateUnion(Rectangle a, Rectangle b) {
@@ -323,23 +356,70 @@ public class DshOverlayForm : Form {
     prevSel = sel;
     sel = r;
     InvalidateUnion(prevSel, r);
+    // The card follows the selection; without this it leaves a trail behind while the
+    // selection is being dragged (measured: the old card stayed painted at its old spot).
+    InvalidateToolbar();
+  }
+
+  // Total width of the card: pad + nine buttons + eight gaps + two separator slots.
+  private int BarWidth() { return BarPad * 2 + BtnW * 9 + BtnGap * 8 + SepSlot * 2; }
+  // Height: pad + button row + divider gap + shortcut row + pad.
+  private int BarHeight() { return BarPad * 2 + BtnH + HintRow + 4; }
+
+  // Left edge of button i inside the card. The separator slots sit before the colour
+  // swatch (i == 7) and before undo (i == 8), which is the only grouping that matters:
+  // tools | colour | undo.
+  private int BtnX(int i) {
+    int x = BarPad + i * (BtnW + BtnGap);
+    if (i >= 7) x += SepSlot;
+    if (i >= 8) x += SepSlot;
+    return x;
   }
 
   private Rectangle ToolbarRect() {
     if (sel.Width < 2 || sel.Height < 2) return Rectangle.Empty;
-    int tw = BtnW * 9 + BtnGap * 8;
+    int tw = BarWidth();
+    int th = BarHeight();
     int ty = sel.Bottom + 10;
-    if (ty + BtnH > this.ClientSize.Height - 6) ty = sel.Top - BtnH - 10;
+    if (ty + th > this.ClientSize.Height - 6) ty = sel.Top - th - 10;
     if (ty < 6) ty = 6;
     int tx = sel.X;
     if (tx + tw > this.ClientSize.Width - 6) tx = this.ClientSize.Width - tw - 6;
     if (tx < 6) tx = 6;
-    return new Rectangle(tx, ty, tw, BtnH);
+    return new Rectangle(tx, ty, tw, th);
   }
 
   private Rectangle BtnRect(int i) {
     Rectangle tb = ToolbarRect();
-    return new Rectangle(tb.X + i * (BtnW + BtnGap), tb.Y, BtnW, BtnH);
+    return new Rectangle(tb.X + BtnX(i), tb.Y + BarPad, BtnW, BtnH);
+  }
+
+  // The card plus the room its shadow needs. Used for invalidation only.
+  private Rectangle CardArea() {
+    Rectangle tb = ToolbarRect();
+    if (tb.Width <= 0 || tb.Height <= 0) return Rectangle.Empty;
+    return Rectangle.Inflate(tb, 12, 12);
+  }
+
+  private void InvalidateToolbar() {
+    Rectangle now = CardArea();
+    Rectangle u = Rectangle.Union(now, lastCard);
+    lastCard = now;
+    if (u.Width > 0 && u.Height > 0) Invalidate(u);
+  }
+
+  // Rounded rectangle path. GDI+ has no rounded-rect primitive, and the whole card,
+  // every button pill and the selection size badge are rounded -- one helper, one look.
+  private static GraphicsPath RoundRect(Rectangle r, int radius) {
+    GraphicsPath p = new GraphicsPath();
+    int d = radius * 2;
+    if (r.Width <= d || r.Height <= d) { p.AddRectangle(r); return p; }
+    p.AddArc(r.X, r.Y, d, d, 180, 90);
+    p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+    p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+    p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+    p.CloseFigure();
+    return p;
   }
 
   private string BtnLabel(int i) {
@@ -543,7 +623,7 @@ public class DshOverlayForm : Form {
     if (my + mh + 24 > this.ClientSize.Height - 4) my = p.Y - 24 - mh;
     if (mx < 4) mx = 4;
     if (my < 4) my = 4;
-    return new Rectangle(mx, my, mw, mh + 22);
+    return new Rectangle(mx, my, mw, mh + 24);
   }
 
   private void DrawMagnifier(Graphics g) {
@@ -556,53 +636,240 @@ public class DshOverlayForm : Form {
     if (sx + srcW > RawBmp.Width) sx = Math.Max(0, RawBmp.Width - srcW);
     if (sy + srcH > RawBmp.Height) sy = Math.Max(0, RawBmp.Height - srcH);
     Rectangle box = LoupeRect(cursor);
-    Rectangle dst = new Rectangle(box.X, box.Y, mw, mh);
-    GraphicsState st = g.Save();
-    InterpolationMode om = g.InterpolationMode;
-    PixelOffsetMode op = g.PixelOffsetMode;
-    g.InterpolationMode = InterpolationMode.NearestNeighbor;
-    g.PixelOffsetMode = PixelOffsetMode.Half;
-    g.DrawImage(RawBmp, dst, new Rectangle(sx, sy, srcW, srcH), GraphicsUnit.Pixel);
-    g.InterpolationMode = om;
-    g.PixelOffsetMode = op;
-    g.Restore(st);
-    using (Pen border = new Pen(Color.White, 1f)) g.DrawRectangle(border, dst);
-    using (Pen cross = new Pen(Color.FromArgb(210, 240, 68, 56), 1f)) {
-      g.DrawLine(cross, dst.X + mw / 2, dst.Y + 8, dst.X + mw / 2, dst.Y + mh - 8);
-      g.DrawLine(cross, dst.X + 8, dst.Y + mh / 2, dst.X + mw - 8, dst.Y + mh / 2);
+    Rectangle dst = new Rectangle(box.X + 1, box.Y + 1, mw, mh);
+    // R66: same card language as the toolbar -- rounded body, drop shadow, hairline edge,
+    // and the coordinate readout INSIDE the card instead of a black strip nailed under it.
+    SmoothingMode oldLSm = g.SmoothingMode;
+    g.SmoothingMode = SmoothingMode.AntiAlias;
+    for (int k = 3; k >= 1; k--) {
+      Rectangle sr = Rectangle.Inflate(box, k, k);
+      sr.Offset(0, 1);
+      using (GraphicsPath sp = RoundRect(sr, 8 + k))
+      using (SolidBrush sb = new SolidBrush(Color.FromArgb(11, 0, 0, 0))) g.FillPath(sb, sp);
     }
-    string lbl = cursor.X + ", " + cursor.Y;
-    using (SolidBrush bg = new SolidBrush(Color.FromArgb(220, 0, 0, 0))) {
-      g.FillRectangle(bg, box.X, box.Y + mh, box.Width, 20);
+    using (GraphicsPath cp = RoundRect(box, 8)) {
+      using (SolidBrush cb = new SolidBrush(CardBg)) g.FillPath(cb, cp);
     }
-    g.DrawString(lbl, uiFont, Brushes.White, box.X + 4, box.Y + mh + 2);
+    // The zoomed pixels are clipped to the card, so the corners really are rounded.
+    using (GraphicsPath ip = RoundRect(dst, 7)) {
+      GraphicsState st = g.Save();
+      g.SetClip(ip, CombineMode.Intersect);
+      InterpolationMode om = g.InterpolationMode;
+      PixelOffsetMode op = g.PixelOffsetMode;
+      g.InterpolationMode = InterpolationMode.NearestNeighbor;
+      g.PixelOffsetMode = PixelOffsetMode.Half;
+      GraphicsState st2 = g.Save();
+      g.SetClip(new Rectangle(dst.X, dst.Y, dst.Width, dst.Height), CombineMode.Intersect);
+      g.DrawImage(RawBmp, dst, new Rectangle(sx, sy, srcW, srcH), GraphicsUnit.Pixel);
+      g.Restore(st2);
+      using (Pen cross = new Pen(Color.FromArgb(210, 240, 68, 56), 1f)) {
+        g.DrawLine(cross, dst.X + mw / 2, dst.Y + 8, dst.X + mw / 2, dst.Y + mh - 8);
+        g.DrawLine(cross, dst.X + 8, dst.Y + mh / 2, dst.X + mw - 8, dst.Y + mh / 2);
+      }
+      g.InterpolationMode = om;
+      g.PixelOffsetMode = op;
+      g.Restore(st);
+    }
+    using (GraphicsPath cb2 = RoundRect(box, 8))
+    using (Pen ce = new Pen(CardEdge, 1f)) g.DrawPath(ce, cb2);
+    Rectangle ro = new Rectangle(box.X + 8, box.Y + 1 + mh, box.Width - 16, box.Height - mh - 2);
+    TextRenderer.DrawText(g, cursor.X + ", " + cursor.Y, hintFont, ro, Color.FromArgb(232, 255, 255, 255),
+      TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+      TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+    g.SmoothingMode = oldLSm;
   }
 
   private void DrawToolbar(Graphics g) {
-    for (int i = 0; i < 9; i++) {
-      Rectangle r = BtnRect(i);
-      bool active = (i < 7 && i == tool);
-      Color bg = active ? Accent : Color.FromArgb(235, 38, 38, 44);
-      using (SolidBrush b = new SolidBrush(bg)) g.FillRectangle(b, r);
-      using (Pen p = new Pen(Color.FromArgb(255, 96, 96, 108), 1f)) g.DrawRectangle(p, r.X, r.Y, r.Width - 1, r.Height - 1);
-      if (i == 7) {
-        // colour swatch: shows the colour the next stroke will use
-        using (SolidBrush sw = new SolidBrush(palette[colorIdx])) {
-          g.FillEllipse(sw, r.X + r.Width / 2 - 9, r.Y + r.Height / 2 - 9, 18, 18);
-        }
-        using (Pen ring = new Pen(Color.White, 1f)) {
-          g.DrawEllipse(ring, r.X + r.Width / 2 - 9, r.Y + r.Height / 2 - 9, 18, 18);
-        }
-        continue;
-      }
-      string label = BtnLabel(i);
-      SizeF sz = g.MeasureString(label, uiFont);
-      using (SolidBrush fg = new SolidBrush(active && IsLight(Accent) ? Color.Black : Color.White)) {
-        g.DrawString(label, uiFont, fg, r.X + (r.Width - sz.Width) / 2f, r.Y + (r.Height - sz.Height) / 2f);
+    Rectangle tb = ToolbarRect();
+    if (tb.Width <= 0 || tb.Height <= 0) return;
+    SmoothingMode oldSm = g.SmoothingMode;
+    PixelOffsetMode oldPx = g.PixelOffsetMode;
+    g.SmoothingMode = SmoothingMode.AntiAlias;
+    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+    lastCard = CardArea();
+
+    // Three stacked rounded rects, widest last: a soft drop shadow without blur support.
+    for (int k = 3; k >= 1; k--) {
+      Rectangle sr = Rectangle.Inflate(tb, k, k);
+      sr.Offset(0, 2);
+      using (GraphicsPath sp = RoundRect(sr, 10 + k))
+      using (SolidBrush sb = new SolidBrush(Color.FromArgb(11, 0, 0, 0))) g.FillPath(sb, sp);
+    }
+    using (GraphicsPath cp = RoundRect(tb, 10)) {
+      using (SolidBrush cb = new SolidBrush(CardBg)) g.FillPath(cb, cp);
+      using (Pen ce = new Pen(CardEdge, 1f)) g.DrawPath(ce, cp);
+    }
+    // 1 px inner highlight: what separates a "dark slab" from a raised surface.
+    Rectangle inner = Rectangle.Inflate(tb, -1, -1);
+    using (GraphicsPath ip = RoundRect(inner, 9))
+    using (Pen hl = new Pen(Color.FromArgb(15, 255, 255, 255), 1f)) g.DrawPath(hl, ip);
+
+    for (int i = 0; i < 9; i++) DrawButton(g, i);
+
+    // Group separators: tools | colour | undo. Drawn last so they sit on the card,
+    // and short (10 px inset) so they read as dividers, not as borders.
+    using (Pen sp = new Pen(SepInk, 1f)) {
+      for (int k = 0; k < 2; k++) {
+        int bi = k == 0 ? 6 : 7;
+        float sx = tb.X + (BtnX(bi) + BtnW + BtnX(bi + 1)) / 2f;
+        g.DrawLine(sp, sx, tb.Y + BarPad + 8, sx, tb.Y + BarPad + BtnH - 8);
       }
     }
-    Rectangle tb = ToolbarRect();
-    g.DrawString((Hint != null && Hint.Length > 0) ? Hint : "Enter copy   P pin   Esc back   Ctrl+Z undo   X width   C colour", uiFont, Brushes.White, tb.X, tb.Bottom + 4);
+
+    // The shortcut line lives INSIDE the card now (it used to be a floating white
+    // string under the bar). A hairline divider makes the two rows read as one panel.
+    float dy = tb.Y + BarPad + BtnH + 1;
+    using (Pen dp = new Pen(SepInk, 1f)) g.DrawLine(dp, tb.X + 10, dy, tb.Right - 10, dy);
+    string hint = (Hint != null && Hint.Length > 0) ? Hint : "Enter copy   P pin   Esc back   Ctrl+Z undo   X width   C colour";
+    Rectangle hr = new Rectangle(tb.X + 10, tb.Y + BarPad + BtnH + 2, tb.Width - 20, HintRow - 2);
+    // The hideSelf prefix ("window hidden") lengthens this line by ~90 px; shrink one step
+    // so the tail (C colour) is not the thing that gets ellipsised away.
+    Font hf = hintFont;
+    Size hMeas = TextRenderer.MeasureText(hint, hf, new Size(4096, 40), TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+    if (hMeas.Width > hr.Width) hf = hintFontMin;
+    TextRenderer.DrawText(g, hint, hf, hr, Color.FromArgb(118, 255, 255, 255),
+      TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+      TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+
+    g.PixelOffsetMode = oldPx;
+    g.SmoothingMode = oldSm;
+  }
+
+  private void DrawButton(Graphics g, int i) {
+    Rectangle r = BtnRect(i);
+    if (r.Width <= 0 || r.Height <= 0) return;
+    bool active = (i < 7 && i == tool);
+    bool hot = (i == hoverBtn);
+    Color ink = Color.FromArgb(236, 255, 255, 255);
+    Color cap = InkDim;
+    if (active) {
+      // A filled pill, not a tinted one: at 20 px icon size a 40-level tint reads as
+      // "slightly lighter", while a solid accent is unmistakable. Light accents get
+      // dark glyphs (white-on-white was a real bug once -- see IsLight below).
+      using (GraphicsPath pp = RoundRect(r, 9))
+      using (SolidBrush pb = new SolidBrush(Accent)) g.FillPath(pb, pp);
+      bool light = IsLight(Accent);
+      ink = light ? Color.FromArgb(255, 22, 22, 26) : Color.White;
+      cap = light ? Color.FromArgb(185, 22, 22, 26) : Color.FromArgb(215, 255, 255, 255);
+    } else if (hot) {
+      using (GraphicsPath pp = RoundRect(r, 9))
+      using (SolidBrush pb = new SolidBrush(HoverFill)) g.FillPath(pb, pp);
+      ink = Color.White;
+      cap = Color.FromArgb(200, 255, 255, 255);
+    }
+    Rectangle ib = new Rectangle(r.X + (r.Width - IconBox) / 2, r.Y + 5, IconBox, IconBox);
+    DrawIcon(g, i, ib, ink);
+    string label = BtnLabel(i);
+    if (label != null && label.Length > 0) {
+      DrawCaption(g, label, new Rectangle(r.X + 1, r.Y + 27, r.Width - 2, 15), cap);
+    }
+  }
+
+  private void DrawCaption(Graphics g, string text, Rectangle box, Color ink) {
+    TextFormatFlags m = TextFormatFlags.HorizontalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+    Size raw = TextRenderer.MeasureText(text, capFont, new Size(4096, 40), m);
+    Font f = raw.Width <= box.Width ? capFont : capFontMin;
+    TextRenderer.DrawText(g, text, f, box, ink, m | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+  }
+
+  // Icons are drawn, never bitmapped: the helper has to stay a single ASCII .ps1 with
+  // no assets, and a vector glyph follows the 20 px box on any DPI.
+  private void DrawIcon(Graphics g, int i, Rectangle b, Color c) {
+    float x = b.X;
+    float y = b.Y;
+    if (i == 0) {
+      using (Pen p = new Pen(c, 1.8f)) { p.LineJoin = LineJoin.Round; g.DrawRectangle(p, x + 2.5f, y + 4.5f, 15f, 11f); }
+      return;
+    }
+    if (i == 1) {
+      using (Pen p = new Pen(c, 1.8f)) {
+        p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+        g.DrawLine(p, x + 4f, y + 16f, x + 16f, y + 4f);
+        g.DrawLine(p, x + 16f, y + 4f, x + 9.4f, y + 5.2f);
+        g.DrawLine(p, x + 16f, y + 4f, x + 14.8f, y + 10.6f);
+      }
+      return;
+    }
+    if (i == 2) {
+      // pencil: OUTLINED barrel + FILLED nib. A solid thick line just reads as a slash
+      // (first attempt, seen in the render check); the outline gives it a body, and the
+      // filled wedge is what makes the point obvious at 20 px.
+      // Axis P0 (eraser) -> P1 (nib base), half width 2.0 on the diagonal.
+      PointF p0 = new PointF(x + 16.2f, y + 4.4f);
+      PointF p1 = new PointF(x + 9.4f, y + 11.2f);
+      PointF u = new PointF(1.41f, 1.41f);           // perpendicular, unit-ish
+      PointF[] body = new PointF[] {
+        new PointF(p0.X + u.X, p0.Y + u.Y),
+        new PointF(p1.X + u.X, p1.Y + u.Y),
+        new PointF(p1.X - u.X, p1.Y - u.Y),
+        new PointF(p0.X - u.X, p0.Y - u.Y)
+      };
+      using (Pen p = new Pen(c, 1.5f)) {
+        p.LineJoin = LineJoin.Round;
+        g.DrawPolygon(p, body);
+      }
+      // ferrule: short line across the barrel just below the eraser end
+      PointF f = new PointF(p0.X - 1.7f, p0.Y + 1.7f);
+      using (Pen p = new Pen(c, 1.3f)) g.DrawLine(p, f.X + u.X, f.Y + u.Y, f.X - u.X, f.Y - u.Y);
+      PointF[] tip = new PointF[] {
+        new PointF(p1.X + u.X, p1.Y + u.Y),
+        new PointF(p1.X - u.X, p1.Y - u.Y),
+        new PointF(p1.X - 3.3f, p1.Y + 3.3f)
+      };
+      using (SolidBrush bb = new SolidBrush(c)) g.FillPolygon(bb, tip);
+      return;
+    }
+    if (i == 3) {
+      for (int r = 0; r < 3; r++) {
+        for (int q = 0; q < 3; q++) {
+          float cx = x + 1.5f + q * 6f;
+          float cy = y + 1.5f + r * 6f;
+          if ((r + q) % 2 == 0) {
+            using (SolidBrush bb = new SolidBrush(c)) g.FillRectangle(bb, cx, cy, 5.6f, 5.6f);
+          } else {
+            using (Pen p = new Pen(c, 1.1f)) g.DrawRectangle(p, cx, cy, 5.6f, 5.6f);
+          }
+        }
+      }
+      return;
+    }
+    if (i == 4) {
+      using (SolidBrush bb = new SolidBrush(c)) g.FillEllipse(bb, x + 2.5f, y + 2.5f, 15f, 15f);
+      using (Pen p = new Pen(CardBg, 1.9f)) {
+        p.StartCap = LineCap.Round; p.EndCap = LineCap.Round;
+        g.DrawLine(p, x + 10.6f, y + 6.4f, x + 10.6f, y + 13.8f);
+        g.DrawLine(p, x + 10.6f, y + 6.4f, x + 7.6f, y + 8.9f);
+      }
+      return;
+    }
+    if (i == 5) {
+      using (Pen p = new Pen(c, 1.9f)) {
+        p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+        g.DrawLine(p, x + 4.5f, y + 5f, x + 15.5f, y + 5f);
+        g.DrawLine(p, x + 10f, y + 5f, x + 10f, y + 15.5f);
+      }
+      return;
+    }
+    if (i == 6) {
+      using (Pen p = new Pen(c, 1.8f)) g.DrawEllipse(p, x + 2.5f, y + 4.5f, 15f, 11f);
+      return;
+    }
+    if (i == 7) {
+      // colour swatch: the actual next-stroke colour, on a dark ring so a white
+      // palette entry still reads as a disc instead of vanishing into the card.
+      using (Pen dark = new Pen(Color.FromArgb(90, 0, 0, 0), 1.2f)) g.DrawEllipse(dark, x + 1.6f, y + 1.6f, 16.8f, 16.8f);
+      using (SolidBrush sw = new SolidBrush(palette[colorIdx])) g.FillEllipse(sw, x + 2.5f, y + 2.5f, 15f, 15f);
+      using (Pen ring = new Pen(Color.FromArgb(240, 255, 255, 255), 1.4f)) g.DrawEllipse(ring, x + 2.5f, y + 2.5f, 15f, 15f);
+      return;
+    }
+    // undo: "return" glyph -- top bar, right edge coming down, arrowhead on the left
+    using (Pen p = new Pen(c, 1.8f)) {
+      p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+      g.DrawLine(p, x + 6.8f, y + 7.2f, x + 13.2f, y + 7.2f);
+      g.DrawLine(p, x + 13.2f, y + 7.2f, x + 13.2f, y + 13f);
+      g.DrawLine(p, x + 6.8f, y + 7.2f, x + 10f, y + 3.8f);
+      g.DrawLine(p, x + 6.8f, y + 7.2f, x + 10f, y + 10.6f);
+    }
   }
 
   protected override void OnPaint(PaintEventArgs e) {
@@ -627,10 +894,29 @@ public class DshOverlayForm : Form {
 
       using (Pen pen = new Pen(Accent, 2)) g.DrawRectangle(pen, sel.X, sel.Y, sel.Width, sel.Height);
 
+      // Size badge: a rounded pill with an accent hairline instead of raw white text.
+      // Same numbers, but it now reads as an object rather than as stray glyphs.
       string label = sel.Width + " x " + sel.Height;
-      float ly = sel.Y - 22;
-      if (ly < 2) ly = sel.Y + 4;
-      g.DrawString(label, labelFont, Brushes.White, sel.X + 4, ly);
+      Size lsz = TextRenderer.MeasureText(label, labelFont, new Size(4096, 40),
+        TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+      int pw = lsz.Width + 14;
+      int ph = lsz.Height + 5;
+      int px = sel.X;
+      int py = sel.Y - ph - 6;
+      if (py < 2) py = sel.Y + 4;
+      if (px + pw > this.ClientSize.Width - 4) px = this.ClientSize.Width - pw - 4;
+      if (px < 2) px = 2;
+      Rectangle pill = new Rectangle(px, py, pw, ph);
+      SmoothingMode oldPillSm = g.SmoothingMode;
+      g.SmoothingMode = SmoothingMode.AntiAlias;
+      using (GraphicsPath pp = RoundRect(pill, 5)) {
+        using (SolidBrush pb = new SolidBrush(Color.FromArgb(232, 20, 20, 24))) g.FillPath(pb, pp);
+        using (Pen pn = new Pen(Color.FromArgb(150, Accent), 1f)) g.DrawPath(pn, pp);
+      }
+      g.SmoothingMode = oldPillSm;
+      TextRenderer.DrawText(g, label, labelFont, pill, Color.White,
+        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+        TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
 
       if (phase == 1) DrawToolbar(g);
     }
@@ -651,14 +937,18 @@ public class DshOverlayForm : Form {
             UndoLast();
           } else if (i == 7) {
             CycleColor();
-            Invalidate(ToolbarRect());
+            InvalidateToolbar();
           } else {
             tool = i;
-            Invalidate(ToolbarRect());
+            InvalidateToolbar();
           }
           return;
         }
       }
+      // R66: the card is 82 px tall now (it was 26), so the hint row and the padding are
+      // a big accidental target -- a click there used to fall through to "start a new
+      // selection" and silently throw away the current one. Consume it.
+      if (ToolbarRect().Contains(e.Location)) return;
       if (tool == 5) {
         // Creating a control is the fragile step; never let it take the overlay down.
         try { BeginText(e.Location); } catch { }
@@ -700,6 +990,20 @@ public class DshOverlayForm : Form {
 
   protected override void OnMouseMove(MouseEventArgs e) {
     base.OnMouseMove(e);
+    // Hover feedback for the card. Only repaint when the hovered button CHANGES --
+    // repainting 458x82 on every mouse move would show up as lag while annotating.
+    if (phase == 1 && !dragging) {
+      int hb = -1;
+      for (int i = 0; i < 9; i++) {
+        if (BtnRect(i).Contains(e.Location)) { hb = i; break; }
+      }
+      if (hb != hoverBtn) {
+        hoverBtn = hb;
+        Rectangle ca = CardArea();
+        if (ca.Width > 0 && ca.Height > 0) Invalidate(ca);
+        try { this.Cursor = hb >= 0 ? Cursors.Hand : Cursors.Cross; } catch { }
+      }
+    }
     if (phase == 0) {
       // the loupe follows the cursor even when nothing is being dragged
       Rectangle oldL = LoupeRect(cursor);
@@ -721,6 +1025,16 @@ public class DshOverlayForm : Form {
     cur.B = e.Location;
     if (cur.Tool == 2) cur.Pts.Add(e.Location);
     Invalidate(Rectangle.Union(Rectangle.Inflate(old, 24, 24), Rectangle.Inflate(cur.Bounds, 24, 24)));
+  }
+
+  protected override void OnMouseLeave(EventArgs e) {
+    base.OnMouseLeave(e);
+    if (hoverBtn != -1) {
+      hoverBtn = -1;
+      Rectangle ca = CardArea();
+      if (ca.Width > 0 && ca.Height > 0) Invalidate(ca);
+    }
+    try { this.Cursor = Cursors.Cross; } catch { }
   }
 
   protected override void OnMouseUp(MouseEventArgs e) {
@@ -791,14 +1105,14 @@ public class DshOverlayForm : Form {
       return;
     }
     if (phase == 1) {
-      if (e.KeyCode == Keys.D1 || e.KeyCode == Keys.NumPad1) { tool = 0; Invalidate(ToolbarRect()); }
-      else if (e.KeyCode == Keys.D2 || e.KeyCode == Keys.NumPad2) { tool = 1; Invalidate(ToolbarRect()); }
-      else if (e.KeyCode == Keys.D3 || e.KeyCode == Keys.NumPad3) { tool = 2; Invalidate(ToolbarRect()); }
-      else if (e.KeyCode == Keys.D4 || e.KeyCode == Keys.NumPad4) { tool = 3; Invalidate(ToolbarRect()); }
-      else if (e.KeyCode == Keys.D5 || e.KeyCode == Keys.NumPad5) { tool = 4; Invalidate(ToolbarRect()); }
-      else if (e.KeyCode == Keys.D6 || e.KeyCode == Keys.NumPad6) { tool = 5; Invalidate(ToolbarRect()); }
-      else if (e.KeyCode == Keys.D7 || e.KeyCode == Keys.NumPad7) { tool = 6; Invalidate(ToolbarRect()); }
-      else if (e.KeyCode == Keys.C) { CycleColor(); Invalidate(ToolbarRect()); }
+      if (e.KeyCode == Keys.D1 || e.KeyCode == Keys.NumPad1) { tool = 0; InvalidateToolbar(); }
+      else if (e.KeyCode == Keys.D2 || e.KeyCode == Keys.NumPad2) { tool = 1; InvalidateToolbar(); }
+      else if (e.KeyCode == Keys.D3 || e.KeyCode == Keys.NumPad3) { tool = 2; InvalidateToolbar(); }
+      else if (e.KeyCode == Keys.D4 || e.KeyCode == Keys.NumPad4) { tool = 3; InvalidateToolbar(); }
+      else if (e.KeyCode == Keys.D5 || e.KeyCode == Keys.NumPad5) { tool = 4; InvalidateToolbar(); }
+      else if (e.KeyCode == Keys.D6 || e.KeyCode == Keys.NumPad6) { tool = 5; InvalidateToolbar(); }
+      else if (e.KeyCode == Keys.D7 || e.KeyCode == Keys.NumPad7) { tool = 6; InvalidateToolbar(); }
+      else if (e.KeyCode == Keys.C) { CycleColor(); InvalidateToolbar(); }
       else if (e.KeyCode == Keys.X) { CycleWidth(); }
     }
   }
@@ -874,6 +1188,17 @@ public class DshOverlayForm : Form {
     el.B = new Point(470, 372);
     shapes.Add(el);
     DumpForm(".annotate");
+    // R66: the card grew from 624x26 to 458x82, so its two other placements have to be
+    // seen, not assumed -- a mouse cannot reach either in a self test:
+    //   .flip   selection near the bottom, so the card must flip ABOVE it
+    //   .hover  same but with a hovered button (the state CSS would give us for free)
+    if (FormShotPath != null && FormShotPath.Length > 0) {
+      hoverBtn = 2;
+      SetSel(new Rectangle(200, this.ClientSize.Height - 170, 320, 120));
+      DumpForm(".flip");
+      hoverBtn = -1;
+      SetSel(new Rectangle(200, 150, 320, 240));
+    }
     Invalidate();
   }
 

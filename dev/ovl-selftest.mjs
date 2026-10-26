@@ -120,6 +120,14 @@ async function main() {
 		const p = path.join(OVERLAY_DIR, 'form' + suffix)
 		check('form shot ' + suffix, fs.existsSync(p) && fs.statSync(p).size > 50000, { exists: fs.existsSync(p) })
 	}
+	// R66：工具条从 624x26 变成 458x82，另外两种摆位也必须**画出来**才可信 ——
+	//   .flip  选区贴着屏幕底部时，卡片必须翻到选区**上方**（否则盖住要截的内容）
+	//   （同一次 dump 里还带一个 hover 态按钮：CSS 免费给的东西这里得自己画）
+	{
+		const pf = path.join(OVERLAY_DIR, 'form.flip.png')
+		const exists = fs.existsSync(pf)
+		check('form shot .flip.png (card above a bottom selection, one button hovered)', exists && fs.statSync(pf).size > 50000, { exists })
+	}
 
 	// ── 闸门 2b：regionOnly —— 只要矩形，不标注 / 不复制 / 不落盘 ─────
 	// 长截图 / 提取文字 / 屏幕翻译的第一步都是这个：框一块屏幕区域，然后自己抓那一块。

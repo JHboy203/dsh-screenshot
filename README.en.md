@@ -28,6 +28,13 @@ Annotation tools: rectangle / ellipse / arrow / pen / text / mosaic, eight colou
 Enter to finish, Esc to cancel, Ctrl+Z/Y, Ctrl+C, Ctrl+S, Ctrl+A to select all, double-click for full screen.
 There is also **pinning an image** (pinned onto the UI, drag to move, Ctrl+wheel to zoom).
 
+The toolbar (reskinned in R66): one rounded card holding nine **vector icons with small captions** (rect / arrow / pen / mosaic / number /
+text / ellipse / colour / undo). The active tool is a solid filled pill, hovering shows a soft highlight, the **shortcut line moved inside
+the card** (it used to be a floating white string under the bar), and a hairline divider splits it into "tools | colour | undo". When the
+selection sits near the bottom of the screen the card flips **above** it so it never covers what you are capturing. The size badge and the
+magnifier use the same card language (rounded, shadowed, hairline edge, readout inside). Everything is **drawn** with GDI+ — no bitmap
+assets — so it stays crisp at any DPI and the plugin remains a single plain-text `.ps1`.
+
 Hotkeys: `Ctrl+Alt+A` screenshot, `Ctrl+Alt+O` extract text.
 
 ## Why screen capture must live on the host side
@@ -132,7 +139,7 @@ child process because those scripts call `process.exit()`.
 `{dryRun:false}` really commits and pushes. It refuses to commit when the selftests are red.
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 496 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 604 checks: files / manifests / both-side contracts / overlay / wiring / PowerShell static checks / host loadability
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
