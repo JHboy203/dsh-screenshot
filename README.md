@@ -133,7 +133,7 @@ shot_gate({full:true, host:true})   # 再加宿主全量（≈10 分钟）
 确认后 `{dryRun:false}` 才真的提交推送；自检红了它**不会**提交。
 
 ```bash
-node .tools/dsh-shot-smoke.mjs          # 604 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
+node .tools/dsh-shot-smoke.mjs          # 607 项：文件/清单/两端契约/覆盖层/接线/PowerShell 静态体检/宿主可加载
 node .tools/dsh-shot-smoke.mjs --live   # 再加真抓屏 + 真 OCR（沙箱里会 SKIP，见坑 2）
 ```
 
