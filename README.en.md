@@ -474,7 +474,7 @@ mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-screenshot" "<
 After the restart a screenshot button appears next to the "voice" button of the chat input box; `Ctrl+Alt+A`
 also works.
 
-> ⚠️ **Do not install with `dsh plugin add` / `pnpm add`.** `dsh plugin` just forwards its arguments to pnpm;
+> ⚠️ **Do not use pnpm-style commands (`dsh plugin add` / `pnpm add`).** `dsh plugin` just forwards its arguments to pnpm;
 > pnpm recomputes the tree and hoists a second `@deepseek-ai/dsh-tools` into the profile, which shadows the
 > host's copy — every tool call then fails with `Cannot read properties of undefined (reading 'prepare')`.
 >

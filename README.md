@@ -459,7 +459,7 @@ mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-screenshot" "<
 
 重启后对话输入框「语音」键旁边多一个截图按钮即成功；按 `Ctrl+Alt+A` 也能直接截。
 
-> ⚠️ **不要用 `dsh plugin add` / `pnpm add` 装它。** `dsh plugin` 只是把参数转发给 pnpm；
+> ⚠️ **不要用 pnpm 系命令（`dsh plugin add` / `pnpm add`）装它。** `dsh plugin` 只是把参数转发给 pnpm；
 > pnpm 会重算整棵树、把 `@deepseek-ai/dsh-tools` 再 hoist 一份进 profile，那份会遮蔽宿主的，
 > 于是每次工具调用报 `Cannot read properties of undefined (reading 'prepare')`。
 >
