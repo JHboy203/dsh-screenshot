@@ -2,6 +2,17 @@
 
 [English](README.en.md)
 
+> **状态：开发版（0.1.x），非最终版本。** 这是「边用边改」放出来的版本：功能与界面会**不定期更新**。
+> 抓屏是 Windows 专有实现，换宿主大版本前请先跑 `shot_health`。
+>
+> **Status: development build (0.1.x) — not a final release.** Released as-is from daily use; features
+> and UI **change from time to time**. Screen capture is Windows-only; run `shot_health` after any host
+> upgrade.
+
+![截图演示：框选区域 + 尺寸角标 + 工具条](docs/panel.png)
+
+> 上图为**演示图**：工具条与选区样式取自覆盖层的真实渲染（`dev/ovl-skin-shot.mjs`），
+> 背景用的是本插件配套面板的截图，**不含任何本机桌面、托盘或会话信息**。
 
 QQ 同款截图，按钮挂在**对话输入框「语音」键旁边**（`conversation.input.left` 槽，order `-90`）。
 
@@ -390,25 +401,73 @@ node .tools/devserver.mjs 8934 "$DSH_WORKSPACE"
 
 ```bash
 node .tools/dsh-plugin-install.cjs install dsh-screenshot "$DSH_WORKSPACE\DSH-Plugin\dsh-screenshot"
+# ↑ 这是作者工作区的辅助脚本，不在本仓内；没有它就按文末「安装」一节的三步手做
 # 沙箱下 symlink 会 EPERM，改用 cmd /c mklink /J + node .tools/_add-bundle.cjs
 ```
 
 宿主半边改完**必须重启 DSH Desktop**（Electron host 不消费 `patchReload: live`）。
 
 
+## 支持的 DSH 版本
+
+> 装之前先对一下版本。**版本不对时不会"凑合能用"**：轻则输入框旁没有按钮，重则整个插件树加载失败。
+
+| 项 | 值 |
+|---|---|
+| 声明区间 | `>=0.1.2-rc.1 <0.3.0` —— 写在 `package.json` 的 `engines.dsh`（同时声明 `peerDependencies` 的 `@deepseek-ai/dsh-typert-protocol`） |
+| 实测通过 | `0.2.1-rc.2` / `0.2.1-rc.3`（Windows 11 · `desktop` profile · Node 24.21） |
+| 为什么不能更低 | 依赖 Typert `remote` 通道把宿主抓到的图交给浏览器半边，以及 `manifestVersion: 1` 的 `dsh.client.inject` 槽位声明 —— 这两样在更低的宿主上不可用 |
+| `0.3.x` 及以上 | **未验证**。Typert 协议与客户端槽位若再变，按钮可能挂不上；宿主升级后先跑 `shot_health` |
+| Node | 未单独声明（跟随宿主）；本机实测 24.21 |
+
 ## 适用 profile
 
 本插件面向 DSH 的 `desktop` profile。本机已在 `desktop` profile 下加载（`.dsh/profiles/desktop`）。插件包本身不含 profile 配置，profile 名可自行替换。
 
-## 安装（DSH 命令行）
+## 安装
+
+> **平台：Windows 专有。** 抓屏、覆盖层、OCR、录屏全部走 PowerShell + .NET + `ffmpeg -f gdigrab`，
+> macOS / Linux 上**没有实现** —— 在那些平台上装上去，你只会得到一个点了没反应的按钮。
+
+三步，**不需要任何本机脚本**。`<profile>` 默认 `desktop`。
 
 ```bash
-# <profile> 换成你的 profile 名，本机为 desktop
-dsh plugin --profile desktop add <本目录或包名>
+# 0) 版本先对上（见上一节）
+dsh --version
+
+# 1) 克隆到**工作区**（不要直接克隆进 profile/node_modules）
+git clone https://github.com/JHboy203/dsh-screenshot.git "<你的工作区>/DSH-Plugin/dsh-screenshot"
+
+# 2) 链进 profile（普通 cmd 即可，不需要管理员）
+mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-screenshot" "<你的工作区>\DSH-Plugin\dsh-screenshot"
 ```
 
-等价的离线方式：把本仓 `cordis.patch.yml` 里的 `insert` 行追加到本机 profile 的
-`cordis.patch.yml`。**改了 `cordis.patch.yml` 必须重启 DSH**（Desktop 不 watch patch 层）。
+3) 改 `<profile>/package.json` 两处，然后**完全退出并重启 DSH**：
+
+```jsonc
+{
+  "dependencies": {
+    "dsh-screenshot": "link:<你的工作区>/DSH-Plugin/dsh-screenshot"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [ /* …原有条目…, "dsh-screenshot" */ ]
+    }
+  }
+}
+```
+
+重启后对话输入框「语音」键旁边多一个截图按钮即成功；按 `Ctrl+Alt+A` 也能直接截。
+
+> ⚠️ **不要用 `dsh plugin add` / `pnpm add` 装它。** `dsh plugin` 只是把参数转发给 pnpm；
+> pnpm 会重算整棵树、把 `@deepseek-ai/dsh-tools` 再 hoist 一份进 profile，那份会遮蔽宿主的，
+> 于是每次工具调用报 `Cannot read properties of undefined (reading 'prepare')`。
+>
+> 本仓 `cordis.patch.yml` 是 **bundle patch**：包进了 `dsh.profile.bundles` 后宿主会自己读它、
+> 自动 `insert`，**不需要手工往 profile 的 patch 里抄**。
+>
+> **额外外部依赖**：`ffmpeg`（录屏用）。没有它时录屏会明确报错，其它功能不受影响。
+> 抓屏与 OCR 用的是 Windows 自带能力，不需要再装东西。
 
 ## 外部依赖与权限
 

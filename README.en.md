@@ -1,10 +1,18 @@
 # dsh-screenshot · DSH screenshot plugin
 
-[中文](README.md)
+[中文](README.md) · [English](README.en.md)
 
+> **Status: development build (0.1.x) — not a final release.** Released as-is from daily use; features
+> and UI **change from time to time**. Screen capture is a Windows-only implementation; run `shot_health`
+> after any host upgrade.
+>
+> **状态：开发版（0.1.x），非最终版本。** 功能与界面会不定期更新；抓屏是 Windows 专有实现。
 
-[English](README.en.md)
+![Screenshot demo: selection + size badge + toolbar](docs/panel.png)
 
+> The image above is a **demo composition**: the toolbar and selection styling come from a real render of the
+> overlay (`dev/ovl-skin-shot.mjs`); the background is a screenshot of this plugin's own panel. It contains
+> **no desktop, tray or session information from any machine**.
 
 Screenshot, same as QQ: the button hangs **next to the "voice" button of the chat input box** (`conversation.input.left` slot, order `-90`).
 
@@ -411,19 +419,70 @@ node .tools/dsh-plugin-install.cjs install dsh-screenshot "$DSH_WORKSPACE\DSH-Pl
 After changing the host side you **must restart DSH Desktop** (the Electron host does not consume `patchReload: live`).
 
 
+## Supported DSH versions
+
+> Check the version before installing. **A mismatched version does not "sort of work"**: at best there is no
+> button next to the input box, at worst the whole plugin tree fails to load.
+
+| Item | Value |
+|---|---|
+| Declared range | `>=0.1.2-rc.1 <0.3.0` — `engines.dsh` in `package.json` (plus `peerDependencies` on `@deepseek-ai/dsh-typert-protocol`) |
+| Tested | `0.2.1-rc.2` / `0.2.1-rc.3` (Windows 11 · `desktop` profile · Node 24.21) |
+| Why not lower | relies on the Typert `remote` channel to hand the host-captured image to the browser half, and on `manifestVersion: 1` + `dsh.client.inject` slot declarations — neither is available on older hosts |
+| `0.3.x` and above | **Not verified.** If the Typert protocol or client slots change again the button may not mount; after a host upgrade run `shot_health` first |
+| Platform | **Windows only** (PowerShell + .NET + `ffmpeg -f gdigrab`) |
+| Node | not declared separately (follows the host); tested on 24.21 |
+
 ## Applicable profile
 
 This plugin targets DSH's `desktop` profile. It is already loaded under the `desktop` profile on this machine (`.dsh/profiles/desktop`). The plugin package itself contains no profile configuration; you can substitute your own profile name.
 
-## Installation (DSH command line)
+## Installation
+
+> **Platform: Windows only.** Screen capture, the overlay, OCR and recording all go through PowerShell + .NET +
+> `ffmpeg -f gdigrab`; there is **no implementation** for macOS / Linux — installing there only gives you a
+> button that does nothing.
+
+Three steps, **no local helper script required**. `<profile>` is `desktop` by default.
 
 ```bash
-# <profile> 换成你的 profile 名，本机为 desktop
-dsh plugin --profile desktop add <本目录或包名>
+# 0) check the host version against the range above
+dsh --version
+
+# 1) clone into your **workspace** (not into profile/node_modules)
+git clone https://github.com/JHboy203/dsh-screenshot.git "<your-workspace>/DSH-Plugin/dsh-screenshot"
+
+# 2) link into the profile (plain cmd is enough, no admin)
+mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-screenshot" "<your-workspace>\DSH-Plugin\dsh-screenshot"
 ```
 
-Equivalent offline way: append the `insert` line from this repo's `cordis.patch.yml` to your machine's profile
-`cordis.patch.yml`. **After changing `cordis.patch.yml` you must restart DSH** (Desktop does not watch the patch layer).
+3) Edit `<profile>/package.json` in two places, then **fully quit and restart DSH**:
+
+```jsonc
+{
+  "dependencies": {
+    "dsh-screenshot": "link:<your-workspace>/DSH-Plugin/dsh-screenshot"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [ /* …existing entries…, "dsh-screenshot" */ ]
+    }
+  }
+}
+```
+
+After the restart a screenshot button appears next to the "voice" button of the chat input box; `Ctrl+Alt+A`
+also works.
+
+> ⚠️ **Do not install with `dsh plugin add` / `pnpm add`.** `dsh plugin` just forwards its arguments to pnpm;
+> pnpm recomputes the tree and hoists a second `@deepseek-ai/dsh-tools` into the profile, which shadows the
+> host's copy — every tool call then fails with `Cannot read properties of undefined (reading 'prepare')`.
+>
+> This repo's `cordis.patch.yml` is a **bundle patch**: once the package is in `dsh.profile.bundles` the host
+> reads it and applies the `insert` itself — **do not copy it into the profile patch as well**.
+>
+> **Extra external dependency**: `ffmpeg` (recording only). Without it recording reports an explicit error and
+> everything else still works. Capture and OCR use Windows built-in capabilities — nothing else to install.
 
 ## External dependencies and permissions
 

@@ -20,8 +20,27 @@
     "lib",
     "ps",
     "cordis.patch.yml",
-    "README.md"
+    "LICENSE",
+    "README.md",
+    "README.en.md"
   ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "screenshot",
+    "long-screenshot",
+    "ocr",
+    "screen-recorder",
+    "annotation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JHboy203/dsh-screenshot.git"
+  },
+  "homepage": "https://github.com/JHboy203/dsh-screenshot#readme",
+  "bugs": {
+    "url": "https://github.com/JHboy203/dsh-screenshot/issues"
+  },
   "dsh": {
     "manifestVersion": 1,
     "bundle": {
