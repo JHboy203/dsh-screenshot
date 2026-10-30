@@ -1147,7 +1147,7 @@ public class DshOverlayForm : Form {
       cursor = new Point(520, 420);
       DumpForm(".select");
     }
-    SetSel(new Rectangle(200, 150, 320, 240));
+    SetSel(new Rectangle(180, 120, 1040, 690));
     if (RegionOnly) {
       // Region-only requests never reach the annotate phase. Going through
       // FinishSelection() (not a hand-written Close) is the point: the test then proves
