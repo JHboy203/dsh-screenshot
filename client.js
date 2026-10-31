@@ -3602,6 +3602,55 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * 贴图验收（R67c）——桥里一条命令跑完"这台机器现在能不能贴图"。
+		 *
+		 * 为什么要它：验收贴图原本要三步（宿主有没有 `pin` 方法 / 最后一跳能不能贴成附件 /
+		 * 清干净），这三步里任何一步靠人手点都会漏。这里把**判定**和**贴一张探针图**分开：
+		 *   * 默认 `attach:false`：只判定，**不改任何东西**（不 poll —— poll 是取件式的，
+		 *     会把用户真正的热键/AI 投递吃掉）；
+		 *   * `attach:true`：真的往输入框贴一张 1×1 探针图，返回贴前/贴后的附件数。
+		 * 返回值固定带 `cleanup`（那张探针图的移除按钮选择器），验收完顺手清掉。
+		 */
+		async function pinAccept(opts) {
+			const o = opts && typeof opts === 'object' ? opts : {}
+			/**
+			 * ⚠️ `typeof shot.api.pin === 'function'` **不能**用来判断宿主有没有这个能力：
+			 * 描述符是**客户端自己** `desc('pin', …)` 声明并 mount 上去的，主机那边没有它
+			 * 也一样是函数（R67c 实测：老宿主上这个判据返回 true）。真判据只能是**空调用一次**：
+			 * 新宿主回 `reason:'bad-image'`（不写任何文件），老宿主直接在 Remote 层抛错。
+			 */
+			let hostHasPin = false
+			let probe = ''
+			try {
+				const res = await shot.api.pin('')
+				hostHasPin = !!(res && typeof res === 'object' && res.reason === 'bad-image')
+				probe = hostHasPin ? 'bad-image' : 'unexpected: ' + String((res && res.reason) || '')
+			} catch (error) {
+				probe = 'threw: ' + String((error && error.message) || error)
+			}
+			const before = countComposerAttachments()
+			if (o.attach !== true) {
+				return { ok: hostHasPin, hostHasPin: hostHasPin, probe: probe, attach: false, before: before, after: before, cleanup: '' }
+			}
+			const png =
+				typeof o.dataUrl === 'string' && o.dataUrl.length > 0
+					? o.dataUrl
+					: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+			const name = typeof o.name === 'string' && o.name.length > 0 ? o.name : 'pin-accept.png'
+			await receivePin({ dataUrl: png, name: name, w: 1, h: 1 })
+			const after = countComposerAttachments()
+			return {
+				ok: hostHasPin && after > before,
+				hostHasPin: hostHasPin,
+				probe: probe,
+				attach: true,
+				before: before,
+				after: after,
+				cleanup: 'button[aria-label^="移除图片 ' + name + '"]',
+			}
+		}
+
+		/**
 		 * 把全局热键守护进程按偏好拉起来/停掉。
 		 * 用户可以在菜单里开关 —— 常驻一个 PowerShell 进程是有代价的，
 		 * 不该在用户没要的时候偷偷跑。
@@ -4231,6 +4280,8 @@ window.__ModuleLoader__.load({
 				// （`await __dshotDebug.receivePin({dataUrl, name})`），否则只能等人点鼠标。
 				receivePin: receivePin,
 				countAttachments: countComposerAttachments,
+				// R67c：一条命令验收"这台机器现在能不能贴图"（默认只判定不贴图）。
+				pinAccept: pinAccept,
 				toast: toast,
 			}
 			aiBridgeStart()
