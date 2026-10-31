@@ -1,6 +1,10 @@
 # 临时复现脚本（`dev/_xxx.mjs` 用完即弃；沙箱里删不掉时至少别入库）
 dev/_*
 
+# Python 字节码（texreplay.py 会 import py/stitch.py，跑一次就生成）
+__pycache__/
+*.pyc
+
 # 运行时产物（不入库）
 node_modules/
 .cache/

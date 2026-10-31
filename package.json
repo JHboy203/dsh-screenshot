@@ -1,6 +1,6 @@
 {
   "name": "dsh-screenshot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "DSH GUI 插件：QQ 同款截图（框选 + 标注 + 提取文字 + 贴图 + 录屏 + 长截图），按钮挂在对话输入框「语音」键旁。渲染进程拿不到屏幕（官方主会话无 setDisplayMediaRequestHandler），所以抓屏在宿主半边用 PowerShell/.NET 做，经 Typert Remote 把图交给浏览器半边画。",

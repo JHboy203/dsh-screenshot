@@ -2,10 +2,14 @@
 
 [English](README.en.md)
 
-> **状态：开发版（0.1.x），非最终版本。** 这是「边用边改」放出来的版本：功能与界面会**不定期更新**。
+> **状态：开发版（0.2.x），非最终版本。** 这是「边用边改」放出来的版本：功能与界面会**不定期更新**。
 > 抓屏是 Windows 专有实现，换宿主大版本前请先跑 `shot_health`。
 >
-> **Status: development build (0.1.x) — not a final release.** Released as-is from daily use; features
+> **0.2.0 起**：贴图窗能缩放、有右键动作菜单、能把图**送进输入框**、`Ctrl`+拖动可拖进任何应用；
+> 长截图的拼接器补了「窄重叠只有逐像素精确才算证据」与「精确候选先比深浅、并列才比重叠宽度」两条规则。
+> 同一个版本里，纹理回放探针学会了一件事：**先证明这张页面判得了，再判拼接器**（见「已知限制」里那条）。
+>
+> **Status: development build (0.2.x) — not a final release.** Released as-is from daily use; features
 > and UI **change from time to time**. Screen capture is Windows-only; run `shot_health` after any host
 > upgrade.
 
@@ -193,7 +197,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-selftest.mjs'})        
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/pin-e2e.mjs'})                # R67：贴图「送进输入框」的**宿主取件**验收 —— 往真实信箱写一条交接，等宿主心跳取走（取走即删，判据是标记消失，不需要界面）。20 秒。**老宿主（没重启）会 FAIL 并让你重启 DSH，这不是回归**；新宿主会真的往输入框贴一张 1x1 探针图（跑完按提示移除）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-skin-shot.mjs',
                 args:['--dir','<上面那个 DSH_OVERLAY_DIR>']})                      # **渲染 → 裁图 → 放大**（R66）：从 paint 代码的常量**算**出卡片/角标/放大镜的矩形，一次出 zoom/bar|flip|badge|loupe.png（3 倍，NEAREST），1 秒
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 项：**拼接器在真实页面纹理上**（真截屏 → 造长页面 → 切已知帧 → 与真值逐像素比）：滚动 / 区域里有动画 / 同位置重复帧 / 跳太远 / **窄重叠（25%）** / **窄重叠且动画压在重叠带里**，约 35 秒（R63 起；R65 加后两条）。锁屏或屏幕上没有**互不相同**的纹理时**退 2**（env），不是回归
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 项：**拼接器在真实页面纹理上**（真截屏 → 造长页面 → 切已知帧 → 与真值逐像素比）：滚动 / 区域里有动画 / 同位置重复帧 / 跳太远 / **窄重叠（25%）** / **窄重叠且动画压在重叠带里**，约 35 秒（R63 起；R65 加后两条；R68 加"这张页面判得了吗"）。锁屏、屏幕上没有**互不相同**的纹理、或**页面本身二义**（另一条接缝与真值同样精确，含差一像素的情形）时**退 2**（env），不是回归 —— 判据是 `python dev/texreplay.py check --dir <臂目录>`，它会把"真值多少分 / 另一条多少分 / 差在哪几行"打出来
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ocr-probe.mjs'})              # 29 项：**OCR 端到端**（node 渲染已知文字 → lib/shot.mjs#ocr()）：白底三行 / 深色主题 / 11px 降级 / 空白不报错 / 只认矩形内，约 17 秒（R63）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
                 args:['-App','qt']})                                              # Qt 认不认投递滚轮
@@ -551,6 +555,15 @@ mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-screenshot" "<
   bug 没有一个能从产品 JSON 里看出来 —— 每个评分都只报"一个数字"。实测（真实纹理、真值 237）：
   普通滚动时真值是唯一 0.00、结构判据在 486 个位移里**只认它一个**；动画页里真值处普通残差
   **29.33**（任何残差都不能接受），而按行裁剪与普通评分都会选到 **511**（最窄重叠），结构判据仍只认真值。
+- **页面本身二义时，拼接器判不出来 —— 已实测并写进探针（R68，2026-10-31）**。长截图唯一的证据是
+  「重叠带里的像素一样」，所以当页面里有**大片纯色带**（深色界面的空白区）或**行会周期性重复**
+  （会话列表那种等高行）时，一条**错误**的接缝会和真值同样精确、甚至"更准"。同一份代码实测：
+  真值 237 处残差 21.16（动画块在重画），而 shift 509 在 **11 行纯深色**上拿到 **0.0000**，
+  拼接器照收 → 成品 3334 px（应为 2653）；窄重叠臂的同一帧里 389..396 全是 0.0000，
+  R65 那条"并列取更宽"于是选了 389 —— **4029 px，差一个像素**。这两类都**不可能从像素里判出来**，
+  所以：① 纹理回放探针会**先判"这张页面判得了吗"**，判不了就如实退 2（env），不再报成产品回归；
+  ② 真实长截图遇到纯色/重复内容时，成品高度可能多算或少算几十到几百像素 —— 这是**当前已知上限**，
+  不是随机故障。要稳，就框**每一行都有区分度**的区域。
 - 夹具（`dev/longshot-backdrop.ps1`）默认藏滚动条；`-Scrollbar 1` 保留它，探针的第四条臂就是
   用这个跑一遍 auto，证明上面那条不是纸面结论。
 - **剪贴板是全机独占资源**：别的程序正占着时截图复制会失败（实测报「所请求的剪贴板操作失败」）。

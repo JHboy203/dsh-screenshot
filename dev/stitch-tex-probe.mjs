@@ -30,8 +30,10 @@
 //   shot_probe({probe:'stitch-tex'})        or
 //   host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})
 //
-// Exit: 0 all pass / 1 fail / 2 env (no capture, no python, or the screen has no dense texture --
-// e.g. locked desktop, everything minimized; texreplay reports flat-source for that).
+// Exit: 0 all pass / 1 fail / 2 env (no capture, no python, the screen has no dense texture --
+// e.g. locked desktop, everything minimized; texreplay reports flat-source for that -- or the page
+// is VERTICALLY AMBIGUOUS: a wrong seam scores as well as the truth, measured on this desktop
+// 2026-10-31, where a blank dark band gave 0.000 over 11 rows and the truth scored 21.27)
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -50,6 +52,9 @@ const SHIFT = 237
 const FRAMES = 10
 
 const results = []
+// R68: arms whose built page leaves a wrong seam as good as the truth. Their assertions are
+// skipped (they would describe the screen, not the stitcher) and the probe exits 2 (env).
+const ambiguousArms = []
 function check(name, ok, extra) {
 	results.push({ name, ok: ok === true })
 	console.log(`   ${ok ? 'PASS' : 'FAIL'}  ${name}${extra === undefined ? '' : '  ' + JSON.stringify(extra)}`)
@@ -115,6 +120,15 @@ async function arm(mode, opts = {}) {
 	}
 	const truth = JSON.parse(fs.readFileSync(path.join(dir, 'truth.json'), 'utf8'))
 	check(`${mode}: fixture built from real texture`, truth.frames.length === (mode === 'gap' ? 2 : frames) && truth.density >= 120, { frames: truth.frames.length, width: truth.width, slices: truth.slices, density: truth.density, shift: truth.shift })
+	// R68: can this page even be identified? Refuse to blame the stitcher for an ambiguous page.
+	// Skipped for `gap` (nothing is supposed to match) and `tightanim` (the refusal IS the answer).
+	if (!opts.allowAmbiguous) {
+		const amb = await py3(REPLAY, ['check', '--dir', dir], 90_000)
+		if (amb.json && amb.json.verdict === 'ambiguous-source') {
+			ambiguous(mode, dir, amb.json.ambiguous || [])
+			return { truth: null, result: null, outFile: null, dir, ambiguous: true }
+		}
+	}
 	const outFile = path.join(dir, 'out.png')
 	if (fs.existsSync(outFile)) fs.unlinkSync(outFile)
 	const res = await py3(PY, ['--out', outFile, '--overlap-min', '40', ...truth.frames])
@@ -179,8 +193,22 @@ async function compare(dir, outFile, maxY, dropCols) {
 // 5. gap -- the content jumped farther than one frame height: there is nothing to match, and a
 //    guessed seam is worse than an honest refusal (R58 principle: never emit a plausible wrong
 //    picture). The fallback must NOT somehow "find" an overlap here.
+//
+// R68: every arm that must LAND a seam first asks whether the built page leaves one answer
+// (texreplay.py check). On 2026-10-31 this desktop's own UI did not: a wrong shift scored 0.000
+// over 11 dark rows where the truth scored 21.27, and the narrow arm's page repeats with a 159 px
+// period (0.00 over 287 rows vs the truth's 130). Those ten reds described the SCREEN, not the
+// stitcher, and a fixture that cannot be identified must say so instead of blaming the product.
+function ambiguous(mode, dir, rows) {
+	console.log(`   SKIP  ${mode}: the source texture is AMBIGUOUS -- another seam is equally exact, one pixel away`)
+	for (const p of rows) {
+		const n = p.nearPx || {}
+		console.log(`         pair ${p.pair}: truth ${p.truth} scores ${n.truthScorePx}, shift ${n.shift} scores ${n.score} (both exact)`)
+	}
+	ambiguousArms.push(mode)
+}
 {
-	const { truth, result, outFile } = await arm('gap')
+	const { truth, result, outFile } = await arm('gap', { allowAmbiguous: true })
 	if (truth && result) {
 		check('gap: refused (exit 3), never guessed into a picture', result.code === 3, { code: result.code })
 		check('gap: no output file was written', outFile === null || !fs.existsSync(outFile), { out: outFile })
@@ -220,7 +248,7 @@ async function compare(dir, outFile, maxY, dropCols) {
 //    wrong 509 px -- see MIN_OVERLAP_SHARE). The only honest answer is a refusal.
 //    Measured: 37.98 > 8.00 -> exit 3, no file.
 {
-	const TIGHTANIM = { shift: 390, frames: 6, height: 520, dir: 'tightanim', patchY: 390 }
+	const TIGHTANIM = { shift: 390, frames: 6, height: 520, dir: 'tightanim', patchY: 390, allowAmbiguous: true }
 	const { truth, result, outFile } = await arm('anim', TIGHTANIM)
 	if (truth && result) {
 		check('tightanim: the block really sits inside the overlapping band', truth.patch.y < TIGHTANIM.height && truth.patch.y + truth.patch.h >= TIGHTANIM.shift, { patch: truth.patch, overlapFrom: TIGHTANIM.shift })
@@ -232,5 +260,11 @@ async function compare(dir, outFile, maxY, dropCols) {
 
 const pass = results.filter((r) => r.ok).length
 const fail = results.length - pass
+if (ambiguousArms.length) {
+	console.log(`stitch-tex: ${pass} PASS / ${fail} FAIL -- ENV: the screen texture leaves a wrong seam as good as the truth (${ambiguousArms.join(', ')})  (lab: ${LAB})`)
+	console.log('   A property of the DESKTOP ON SCREEN (a blank band, or a UI whose rows repeat), not of the')
+	console.log('   stitcher: re-run with more distinct content on screen. Details: dev/texreplay.py check --dir <arm>.')
+	process.exit(2)
+}
 console.log(`stitch-tex: ${pass} PASS / ${fail} FAIL  (lab: ${LAB})`)
 process.exit(fail === 0 ? 0 : 1)

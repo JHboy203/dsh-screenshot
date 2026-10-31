@@ -2,11 +2,17 @@
 
 [中文](README.md) · [English](README.en.md)
 
-> **Status: development build (0.1.x) — not a final release.** Released as-is from daily use; features
+> **Status: development build (0.2.x) — not a final release.** Released as-is from daily use; features
 > and UI **change from time to time**. Screen capture is a Windows-only implementation; run `shot_health`
 > after any host upgrade.
 >
-> **状态：开发版（0.1.x），非最终版本。** 功能与界面会不定期更新；抓屏是 Windows 专有实现。
+> **Since 0.2.0**: the pin window scales, has a right-click action menu, can **send the picture into the
+> composer**, and `Ctrl`+drag drops it into any app; the long-screenshot stitcher gained "a narrow overlap
+> only counts when it is pixel-exact" and "among exact candidates take the deepest minimum, break ties on
+> the wider overlap". In the same release the texture-replay probe learned to **prove the page is decidable
+> before judging the stitcher** (see the ambiguity bullet under Known limitations).
+>
+> **状态：开发版（0.2.x），非最终版本。** 功能与界面会不定期更新；抓屏是 Windows 专有实现。
 
 ![Screenshot demo: selection + size badge + toolbar](docs/panel.png)
 
@@ -192,7 +198,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
                 args:['run','40','1','90','14']})                                  # lab: one auto session while a block inside the region repaints every 90 ms (the R61 case)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # triage (not a probe; `dev/_*` is not committed): runs one session, keeps every frame, prints "true shift vs the offset the stitcher reported" per pair
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 checks: **the stitcher on REAL page texture** (real screen capture -> synthetic long page -> known frames -> compared with the truth pixel by pixel): plain scroll / animated block / motionless duplicate frame / a jump too far / **narrow 25 % overlap** / **narrow overlap with animation inside the band** — ~35 s (R63; the last two since R65). Exits 2 (env) when the session is locked or the screen has no DISTINCT texture — not a regression
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 checks: **the stitcher on REAL page texture** (real screen capture -> synthetic long page -> known frames -> compared with the truth pixel by pixel): plain scroll / animated block / motionless duplicate frame / a jump too far / **narrow 25 % overlap** / **narrow overlap with animation inside the band** — ~35 s (R63; the last two since R65; since R68 it first asks whether the page is decidable at all). Exits 2 (env) when the session is locked, the screen has no DISTINCT texture, **or the page itself is ambiguous** (another seam is equally pixel-exact, including one pixel away) — not a regression. The verdict comes from `python dev/texreplay.py check --dir <arm dir>`, which prints what the truth scored, what the alternative scored, and over how many rows
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ocr-probe.mjs'})              # 29 checks: **OCR end to end** (node renders known text -> lib/shot.mjs#ocr()): white page of three lines / dark theme / degraded 11 px / blank page is not an error / only inside the rect — 17 s (R63)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 checks: pixel library / probe library / list metadata (1 s, deterministic)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-selftest.mjs'})           # 58 checks: **overlay end to end** (real pick -> annotate -> render -> clipboard/file -> regionOnly -> pin) plus the whole form rendered to form.select/.annotate/.flip.png (R66). Since R67 the pin part reports numbers: 150 % scale with the aspect kept, the seven Chinese captions surviving the ASCII gate, the action menu opening **twice** (v1 disposed the strip in its own Closed handler -> the second Show threw "disposed object", which on a real machine is a MODAL dialog that freezes the serve loop), `pinout.json`+PNG landing in the mailbox, `takePinHandoff` taking it once and deleting it, an out-of-mailbox path being refused, the Ctrl+drag FileDrop preparation, `pinFromFile` on an existing picture and `service.pin` end to end, plus the pin window rendered to pin.png — ~30 s
@@ -559,6 +565,15 @@ also works.
   JSON — every scorer reports "a number". Measured on real texture (truth 237): on a plain scroll the truth is the only 0.00 and the structural
   criterion accepts **exactly one** of 486 shifts; on the animated page the plain residual at the truth is **29.33** (no residual could accept it)
   while both plain and row trimming pick **511** (the narrowest overlap) — and the structural criterion still accepts only the truth.
+- **An ambiguous page cannot be stitched, and that is measured (R68, 2026-10-31).** The only evidence a long screenshot has is
+  "the pixels in the overlap band agree", so when the page contains a **large flat band** (the blank area of a dark UI) or **rows that repeat
+  periodically** (a list of equal-height rows) a **wrong** seam is as pixel-exact as the truth — sometimes more so. Same code, measured: at the
+  truth (237) the residual is 21.16 because the animated block repaints, while shift 509 scores **0.0000 over 11 rows of flat dark pixels**;
+  the stitcher took it and the picture came out 3334 px instead of 2653. In the narrow-overlap arm shifts 389..396 are all 0.0000, so R65's
+  "on a tie take the wider overlap" rule picked 389 — **4029 px, one pixel short**. Neither case can be decided from pixels, therefore:
+  ① the texture-replay probe now **asks whether the page is decidable first** and exits 2 (env) instead of reporting a product regression;
+  ② a real long screenshot over flat/repetitive content can come out tens to hundreds of pixels too tall or too short — a **known current
+  limit**, not a random failure. To stay safe, select a region where **every row carries distinct content**.
 - The probe fixture hides its scrollbar by default; `-Scrollbar 1` keeps it, and the probe's fourth arm runs one auto session that way, so the paragraph above is not a claim on paper.
 - **The clipboard is an exclusive machine-wide resource**: if another program is holding it, copying a screenshot will fail (measured error: "the requested clipboard operation failed").
   The helper retries 4 times; if it still fails, **the client explicitly says "the copy did not succeed" and leaves diagnostics**; it will not pretend to have copied.

@@ -500,9 +500,159 @@ def cmd_landscape(args):
     return 0
 
 
+def cmd_check(args):
+    """Is the built page IDENTIFIABLE at all? (R68, measured 2026-10-31)
+
+    A fixture can only ask "did the stitcher find the seam" when the page leaves exactly one
+    answer. This desktop's own UI does not always: the chat area is a dark blank band and the
+    session list repeats its rows. Measured that evening on 528x520 frames with the truth at 237:
+
+        * shift 509 scored 0.000 over 11 rows of identical dark pixels (the product took it and
+          the picture came out 3334 px instead of 2653);
+        * in the narrow arm shift 231 scored 0.00 over 289 rows where the truth (390) has 130 --
+          the page content repeats with a 159 px period.
+
+    No evidence-based rule prefers the truth there (a wider match with a LOWER residual is the
+    better evidence), so those ten red checks were a property of the SCREEN, not of the stitcher.
+
+    The VERDICT this tool issues is the one an arm cannot argue with: at full resolution, is there
+    a shift ONE PIXEL away from the truth that is equally exact? On the same desktop the narrow
+    arm's pair 6 had 389..396 all at 0.0000 (a dozen rows of flat dark band), so R65's "on a tie
+    keep the wider overlap" rule took 389 for a truth of 390: height 4029 instead of 4030. That is
+    undecidable from pixels, and a caller must report it as ENV (exit 2), never as a failure.
+    The signature-level alternatives are still reported (`bestAlt`) so a red arm can be read, but
+    they are not a verdict -- the product has three passes and rejects most of them (measured: the
+    scroll arm had one at 0.457 against a truth of 0.809 and still landed every seam exactly).
+
+    usage: texreplay.py check --dir <built dir> [--pair k]
+    """
+    opts = {"dir": "", "pair": 0}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--"):
+            key = a[2:].replace("-", "_")
+            i += 1
+            val = args[i] if i < len(args) else ""
+            opts[key] = int(val) if key == "pair" else val
+        i += 1
+    d = opts.get("dir") or ""
+    only = int(opts.get("pair") or 0)
+    if not d or not os.path.isdir(d):
+        print(json.dumps({"ok": False, "error": "need --dir <built dir> (from `build`)"}))
+        return 2
+    truth_path = os.path.join(d, "truth.json")
+    if not os.path.isfile(truth_path):
+        print(json.dumps({"ok": False, "error": "no truth.json in " + d}))
+        return 2
+    with open(truth_path, "r") as f:
+        truth = json.load(f)
+    frames = truth.get("frames") or []
+    offsets = truth.get("offsets") or []
+    if len(frames) < 2:
+        print(json.dumps({"ok": False, "error": "need at least two frames"}))
+        return 2
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "py"))
+    import stitch  # noqa: E402  (imported, never copied: a copy drifts and then explains the wrong code)
+
+    width = int(truth["width"])
+    height = int(truth["height"])
+    margin = stitch.margins(width)
+    sigs = [stitch.signature(f, stitch.SCALE_WIDTH, margin) for f in frames]
+    sw, sh = sigs[0].size
+    ratio = float(height) / float(sh or 1)
+
+    pairs = []
+    for k in range(1, len(frames)):
+        if only and k != only:
+            continue
+        prev, cur = sigs[k - 1], sigs[k]
+        want_px = int(offsets[k - 1]) if k - 1 < len(offsets) else 0
+        if want_px <= 0:
+            # A skipped frame (offset 0) asks a different question: "is this pair identical?".
+            pairs.append({"pair": k, "truth": 0, "skipped": True, "ambiguous": False})
+            continue
+        ts = int(round(want_px / ratio))
+
+        def score(s):
+            return stitch.mean_abs_diff(prev.crop((0, s, sw, sh)), cur.crop((0, 0, sw, sh - s)))
+
+        truth_score = min(score(s) for s in range(max(4, ts - 2), min(sh - 8, ts + 2) + 1))
+        best_alt = None
+        for s in range(4, sh - 8):
+            if abs(s - ts) <= 2:
+                continue
+            # A sliver is not a competing answer: below ~40 rows the product itself refuses to
+            # read anything into it (find_exact_shift / MIN_OVERLAP_SHARE), and one 25-row minim
+            # on this screen scored 0.505 against a 2.99 truth while the product still got that
+            # pair right at full resolution.
+            if int(round((sh - s) * ratio)) < 40:
+                continue
+            v = score(s)
+            if best_alt is None or v < best_alt[0]:
+                best_alt = (v, s)
+        alt_score, alt_s = (best_alt if best_alt else (float("inf"), 0))
+        truth_rows = int(round((sh - ts) * ratio))
+        alt_rows = int(round((sh - alt_s) * ratio))
+        # A seam can also be undecidable by ONE PIXEL: on 2026-10-31 the narrow arm's pair 6 had
+        # shifts 389..396 all at exactly 0.0000 (a dozen rows of the frame are a flat dark band),
+        # so R65's "on a tie keep the WIDER overlap" rule returned 389 for a truth of 390 -- height
+        # 4029 instead of 4030, no error anywhere. That is the page's ambiguity, not a regression,
+        # but only when the truth itself is exact (on the anim arm the truth scores ~21 and its
+        # neighbours do too, and there the structural fallback is what decides).
+        near = None
+        prev_l = Image.open(frames[k - 1]).convert("L").crop((margin, 0, width - margin, height))
+        cur_l = Image.open(frames[k]).convert("L").crop((margin, 0, width - margin, height))
+        lw, lh = prev_l.size
+        base_px = int(round(ts * ratio))
+        base = stitch.mean_abs_diff(prev_l.crop((0, base_px, lw, lh)), cur_l.crop((0, 0, lw, lh - base_px)))
+        if base <= stitch.DUP_TOL:
+            for d in (-3, -2, -1, 1, 2, 3):
+                s2 = base_px + d
+                if s2 <= 2 or s2 >= lh - 8:
+                    continue
+                v = stitch.mean_abs_diff(prev_l.crop((0, s2, lw, lh)), cur_l.crop((0, 0, lw, lh - s2)))
+                if v <= base + stitch.EXACT_EPS:
+                    near = {"shift": s2, "score": round(v, 3), "truthScorePx": round(base, 3)}
+                    break
+        # The VERDICT is the full-resolution tie above, plus one more case that is equally
+        # undecidable: the truth is NOT within tolerance while some other wide shift IS. Then the
+        # plain pass accepts the alternative outright -- measured at 17:00 on this desktop: the
+        # animated page's truth scored 21.16 (the patch repaints) and a 12-row flat band scored
+        # 0.000, so the stitcher took it and the picture grew to 3334 px from 2653. A better-scoring
+        # alternative when the truth ITSELF is within tolerance is not a verdict (the product's
+        # exact/structural passes decide those, and the scroll arm had one at 0.457 vs 0.809 while
+        # landing every seam); it is reported as `bestAlt` so a red arm can be read.
+        ambiguous = near is not None or (alt_score <= stitch.MATCH_TOL and truth_score > stitch.MATCH_TOL)
+        pairs.append({
+            "pair": k,
+            "truth": want_px,
+            "truthSig": ts,
+            "truthScore": round(truth_score, 3),
+            "truthRows": truth_rows,
+            "bestAlt": {"shift": int(round(alt_s * ratio)), "sigShift": alt_s,
+                        "score": round(alt_score, 3), "overlapRows": alt_rows},
+            "nearPx": near,
+            "ambiguous": bool(ambiguous),
+        })
+
+    bad = [p for p in pairs if p["ambiguous"]]
+    print(json.dumps({
+        "ok": True,
+        "dir": d,
+        "signature": [sw, sh],
+        "ratio": round(ratio, 2),
+        "pairs": pairs,
+        "ambiguous": bad,
+        "verdict": "ambiguous-source" if bad else "identifiable",
+    }))
+    return 0
+
+
 def main(argv):
     if len(argv) < 1:
-        print("usage: texreplay.py build|compare|landscape ...", file=sys.stderr)
+        print("usage: texreplay.py build|compare|landscape|check ...", file=sys.stderr)
         return 2
     cmd = argv[0]
     if cmd == "build":
@@ -511,6 +661,8 @@ def main(argv):
         return cmd_compare(argv[1:])
     if cmd == "landscape":
         return cmd_landscape(argv[1:])
+    if cmd == "check":
+        return cmd_check(argv[1:])
     print(json.dumps({"ok": False, "error": "unknown command " + cmd}))
     return 2
 
