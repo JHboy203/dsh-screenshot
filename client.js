@@ -4410,6 +4410,11 @@ window.__ModuleLoader__.load({
 				stopRecording: stopRecording,
 				openMenu: openMenu,
 				pinImage: pinImage,
+				// R67：贴图窗「送进输入框」的**最后一跳**（poll 取到 pin → 贴成附件）。
+				// 放出来是为了验收：宿主还没换的时候，这一跳也能单独喂一张图进去看结果
+				// （`await __dshotDebug.receivePin({dataUrl, name})`），否则只能等人点鼠标。
+				receivePin: receivePin,
+				countAttachments: countComposerAttachments,
 				toast: toast,
 				removePins: () => document.querySelectorAll('.dshot-pin').forEach((n) => n.remove()),
 			}
