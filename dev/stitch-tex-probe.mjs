@@ -121,11 +121,11 @@ async function arm(mode, opts = {}) {
 	const truth = JSON.parse(fs.readFileSync(path.join(dir, 'truth.json'), 'utf8'))
 	check(`${mode}: fixture built from real texture`, truth.frames.length === (mode === 'gap' ? 2 : frames) && truth.density >= 120, { frames: truth.frames.length, width: truth.width, slices: truth.slices, density: truth.density, shift: truth.shift })
 	// R68: can this page even be identified? Refuse to blame the stitcher for an ambiguous page.
-	// Skipped for `gap` (nothing is supposed to match) and `tightanim` (the refusal IS the answer).
+	// Skipped only for `tightanim` (there the refusal IS the answer, so any page will do).
 	if (!opts.allowAmbiguous) {
 		const amb = await py3(REPLAY, ['check', '--dir', dir], 90_000)
 		if (amb.json && amb.json.verdict === 'ambiguous-source') {
-			ambiguous(mode, dir, amb.json.ambiguous || [])
+			ambiguous(opts.dir ?? mode, dir, amb.json.ambiguous || [])
 			return { truth: null, result: null, outFile: null, dir, ambiguous: true }
 		}
 	}
@@ -202,13 +202,19 @@ async function compare(dir, outFile, maxY, dropCols) {
 function ambiguous(mode, dir, rows) {
 	console.log(`   SKIP  ${mode}: the source texture is AMBIGUOUS -- another seam is equally exact, one pixel away`)
 	for (const p of rows) {
-		const n = p.nearPx || {}
-		console.log(`         pair ${p.pair}: truth ${p.truth} scores ${n.truthScorePx}, shift ${n.shift} scores ${n.score} (both exact)`)
+		const n = p.nearPx
+		if (n) {
+			console.log(`         pair ${p.pair}: truth ${p.truth} scores ${n.truthScorePx}, shift ${n.shift} scores ${n.score} (both exact)`)
+		} else {
+			// The `gap` shape: no true overlap, yet a wide shift matches within tolerance.
+			const a = p.bestAlt || {}
+			console.log(`         pair ${p.pair}: frames jumped ${p.truth} px (no true overlap) yet shift ${a.shift} scores ${a.score} over ${a.overlapRows} rows`)
+		}
 	}
 	ambiguousArms.push(mode)
 }
 {
-	const { truth, result, outFile } = await arm('gap', { allowAmbiguous: true })
+	const { truth, result, outFile } = await arm('gap')
 	if (truth && result) {
 		check('gap: refused (exit 3), never guessed into a picture', result.code === 3, { code: result.code })
 		check('gap: no output file was written', outFile === null || !fs.existsSync(outFile), { out: outFile })

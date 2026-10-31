@@ -574,14 +574,21 @@ def cmd_check(args):
             pairs.append({"pair": k, "truth": 0, "skipped": True, "ambiguous": False})
             continue
         ts = int(round(want_px / ratio))
+        # A pair that jumped further than one frame height has NO true overlap: its arm asserts a
+        # REFUSAL, so the question is the opposite one -- does the page let any wide shift match at
+        # all? (measured 17:2x: the gap arm returned exit 0 and wrote a picture, because a flat band
+        # lined up; that is the same ambiguity, seen from the other side.)
+        jump = want_px >= height - 1
 
         def score(s):
             return stitch.mean_abs_diff(prev.crop((0, s, sw, sh)), cur.crop((0, 0, sw, sh - s)))
 
-        truth_score = min(score(s) for s in range(max(4, ts - 2), min(sh - 8, ts + 2) + 1))
+        truth_score = float("inf")
+        if not jump:
+            truth_score = min(score(s) for s in range(max(4, ts - 2), min(sh - 8, ts + 2) + 1))
         best_alt = None
         for s in range(4, sh - 8):
-            if abs(s - ts) <= 2:
+            if not jump and abs(s - ts) <= 2:
                 continue
             # A sliver is not a competing answer: below ~40 rows the product itself refuses to
             # read anything into it (find_exact_shift / MIN_OVERLAP_SHARE), and one 25-row minim
@@ -602,20 +609,21 @@ def cmd_check(args):
         # but only when the truth itself is exact (on the anim arm the truth scores ~21 and its
         # neighbours do too, and there the structural fallback is what decides).
         near = None
-        prev_l = Image.open(frames[k - 1]).convert("L").crop((margin, 0, width - margin, height))
-        cur_l = Image.open(frames[k]).convert("L").crop((margin, 0, width - margin, height))
-        lw, lh = prev_l.size
-        base_px = int(round(ts * ratio))
-        base = stitch.mean_abs_diff(prev_l.crop((0, base_px, lw, lh)), cur_l.crop((0, 0, lw, lh - base_px)))
-        if base <= stitch.DUP_TOL:
-            for d in (-3, -2, -1, 1, 2, 3):
-                s2 = base_px + d
-                if s2 <= 2 or s2 >= lh - 8:
-                    continue
-                v = stitch.mean_abs_diff(prev_l.crop((0, s2, lw, lh)), cur_l.crop((0, 0, lw, lh - s2)))
-                if v <= base + stitch.EXACT_EPS:
-                    near = {"shift": s2, "score": round(v, 3), "truthScorePx": round(base, 3)}
-                    break
+        if not jump:
+            prev_l = Image.open(frames[k - 1]).convert("L").crop((margin, 0, width - margin, height))
+            cur_l = Image.open(frames[k]).convert("L").crop((margin, 0, width - margin, height))
+            lw, lh = prev_l.size
+            base_px = int(round(ts * ratio))
+            base = stitch.mean_abs_diff(prev_l.crop((0, base_px, lw, lh)), cur_l.crop((0, 0, lw, lh - base_px)))
+            if base <= stitch.DUP_TOL:
+                for d in (-3, -2, -1, 1, 2, 3):
+                    s2 = base_px + d
+                    if s2 <= 2 or s2 >= lh - 8:
+                        continue
+                    v = stitch.mean_abs_diff(prev_l.crop((0, s2, lw, lh)), cur_l.crop((0, 0, lw, lh - s2)))
+                    if v <= base + stitch.EXACT_EPS:
+                        near = {"shift": s2, "score": round(v, 3), "truthScorePx": round(base, 3)}
+                        break
         # The VERDICT is the full-resolution tie above, plus one more case that is equally
         # undecidable: the truth is NOT within tolerance while some other wide shift IS. Then the
         # plain pass accepts the alternative outright -- measured at 17:00 on this desktop: the
@@ -624,12 +632,15 @@ def cmd_check(args):
         # alternative when the truth ITSELF is within tolerance is not a verdict (the product's
         # exact/structural passes decide those, and the scroll arm had one at 0.457 vs 0.809 while
         # landing every seam); it is reported as `bestAlt` so a red arm can be read.
-        ambiguous = near is not None or (alt_score <= stitch.MATCH_TOL and truth_score > stitch.MATCH_TOL)
+        # For a JURISDICTION with no true overlap (`gap`) the only question is whether any wide shift
+        # matches within tolerance -- if one does, the page can fake a seam that is not there.
+        ambiguous = near is not None or (alt_score <= stitch.MATCH_TOL and (jump or truth_score > stitch.MATCH_TOL))
         pairs.append({
             "pair": k,
             "truth": want_px,
             "truthSig": ts,
-            "truthScore": round(truth_score, 3),
+            "jump": bool(jump),
+            "truthScore": round(truth_score, 3) if not jump else None,
             "truthRows": truth_rows,
             "bestAlt": {"shift": int(round(alt_s * ratio)), "sigShift": alt_s,
                         "score": round(alt_score, 3), "overlapRows": alt_rows},
