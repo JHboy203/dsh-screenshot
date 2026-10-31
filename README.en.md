@@ -34,7 +34,13 @@ Screenshot, same as QQ: the button hangs **next to the "voice" button of the cha
 
 Annotation tools: rectangle / ellipse / arrow / pen / text / mosaic, eight colours + a thickness slider, undo and redo (cursor model),
 Enter to finish, Esc to cancel, Ctrl+Z/Y, Ctrl+C, Ctrl+S, Ctrl+A to select all, double-click for full screen.
-There is also **pinning an image** (pinned onto the UI, drag to move, Ctrl+wheel to zoom).
+There is also **pinning an image** (press `P` after selecting, or the 📌 button): the shot becomes a **topmost little
+window** on the screen — the wheel or the bottom-right grip scales it (aspect ratio kept, a `W x H  N%` pill shows at the
+top left), left drag moves it, double-click / `Esc` closes it, and **right click opens an action menu**: send to the input
+box / copy image / save as PNG / zoom in / zoom out / actual size / close. "Send to the input box" attaches the picture to
+DSH's composer straight away (the pinned window outlives the capture that produced it, so this runs as "helper writes a
+file → the host picks it up on its heartbeat → the renderer attaches it"; with an old host that never polls, the pin says
+so instead of pretending).
 
 The toolbar (reskinned in R66): one rounded card holding nine **vector icons with small captions** (rect / arrow / pen / mosaic / number /
 text / ellipse / colour / undo). The active tool is a solid filled pill, hovering shows a soft highlight, the **shortcut line moved inside
@@ -184,7 +190,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})      
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 checks: **the stitcher on REAL page texture** (real screen capture -> synthetic long page -> known frames -> compared with the truth pixel by pixel): plain scroll / animated block / motionless duplicate frame / a jump too far / **narrow 25 % overlap** / **narrow overlap with animation inside the band** — ~35 s (R63; the last two since R65). Exits 2 (env) when the session is locked or the screen has no DISTINCT texture — not a regression
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ocr-probe.mjs'})              # 29 checks: **OCR end to end** (node renders known text -> lib/shot.mjs#ocr()): white page of three lines / dark theme / degraded 11 px / blank page is not an error / only inside the rect — 17 s (R63)
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 checks: pixel library / probe library / list metadata (1 s, deterministic)
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-selftest.mjs'})           # 34 checks: **overlay end to end** (real pick -> annotate -> render -> clipboard/file -> regionOnly -> pin) and it renders the whole form to form.select/.annotate/.flip.png (R66: the last one is "selection at the bottom -> the card flips ABOVE it, one button hovered", and flipBar/flipAbove are **numeric assertions**), ~22 s
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-selftest.mjs'})           # 50 checks: **overlay end to end** (real pick -> annotate -> render -> clipboard/file -> regionOnly -> pin) and it renders the whole form to form.select/.annotate/.flip.png (R66: the last one is "selection at the bottom -> the card flips ABOVE it, one button hovered", and flipBar/flipAbove are **numeric assertions**). Since R67 the pin part reports numbers: 150 % scale with the aspect ratio kept, the seven Chinese menu captions surviving the ASCII gate, `pinout.json`+PNG landing in the mailbox, `takePinHandoff` taking it exactly once and deleting it, an out-of-mailbox path being refused, plus the pin window rendered to pin.png — ~26 s
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-skin-shot.mjs',
                 args:['--dir','<that DSH_OVERLAY_DIR>']})                          # **render -> crop -> zoom** (R66): the card / size badge / magnifier rectangles are COMPUTED from the paint constants, four zoomed PNGs in one go (zoom/bar|flip|badge|loupe.png, 3x, NEAREST), 1 s
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/wheel-app-probe.mjs',
@@ -552,6 +558,11 @@ also works.
   The helper retries 4 times; if it still fails, **the client explicitly says "the copy did not succeed" and leaves diagnostics**; it will not pretend to have copied.
 - "Hide the DSH UI while capturing" finds the window by **title** (`DeepSeek Harness` substring match); if the window title is changed beyond
   recognition, it simply does not hide (the screenshot proceeds as usual) and does not error.
+- **Pin window boundaries (R67)**: ① scaling always **keeps the aspect ratio** (no free stretching — a squashed screenshot is useless), range 10 %–400 %;
+  ② the wheel needs one click on the pin first (WinForms only sends wheel input to the focused window), while zoom in / out / actual size in the right-click
+  menu work without focus; ③ "send to the input box" is picked up on the host heartbeat (≤1 s) — **an old host never polls**, so after 4 s the pin says
+  "nobody took it yet — restart DSH" instead of claiming it was delivered; ④ the pin is a **native topmost window in a separate process**, so it disappears
+  when DSH exits or the helper restarts (the picture is still in the clipboard / the composer).
 - Private backup repo: `node_modules`, runtime caches, debug dumps and backup files are excluded per `.gitignore`; to reproduce a run, please `npm install` yourself (if there are dependencies).
 - `$DSH_WORKSPACE`, `$TK_ROOT`, `%USERPROFILE%` and the like in the docs are **placeholders** and must be replaced with actual paths on your machine before use.
 

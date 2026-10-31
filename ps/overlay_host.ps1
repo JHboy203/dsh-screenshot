@@ -1147,7 +1147,11 @@ public class DshOverlayForm : Form {
       cursor = new Point(520, 420);
       DumpForm(".select");
     }
-    SetSel(new Rectangle(180, 120, 1040, 690));
+    // One known rectangle for every branch of the self test. It used to be 320x240 here;
+    // the 10-30 edit made it 1040x690 while every assertion (regionOnly rect, pin width,
+    // the 320x240 PNG) still said 320x240 -- so the gate had been red for two checks.
+    // Restored: measurements are only comparable when the rectangle is the same one.
+    SetSel(new Rectangle(200, 150, 320, 240));
     if (RegionOnly) {
       // Region-only requests never reach the annotate phase. Going through
       // FinishSelection() (not a hand-written Close) is the point: the test then proves
@@ -1242,13 +1246,42 @@ public class DshOverlayForm : Form {
   }
 }
 
-// A pinned screenshot: borderless, topmost, drag to move, double-click / right-click /
-// Esc to close. It is NOT modal -- it has to outlive the overlay that produced it, so
-// the helper's serve loop pumps messages (Application::DoEvents) to keep it alive.
+// A pinned screenshot: borderless, topmost. Left drag moves it, the wheel scales it, the
+// bottom-right grip resizes it, right click opens the action menu, double click / Esc / the
+// menu's Close item closes it. It is NOT modal -- it has to outlive the overlay that produced
+// it, so the helper's serve loop pumps messages (Application::DoEvents) to keep it alive.
+//
+// R67 -- user report "the pinned picture cannot be scaled, and it cannot reach the composer".
+// Two changes, both measured by dev/ovl-selftest.mjs (no human can click a topmost window in
+// this sandbox, so the scale math / the menu / the hand-off file are callable as Debug hooks):
+//   * scale    -> wheel + grip, aspect ratio always kept, a size pill while it changes.
+//   * composer -> the menu writes the PNG next to a one-line <HandoffFile> JSON and the host
+//                 polls that file (lib/overlay.mjs#takePinHandoff) then hands the picture to
+//                 the renderer, which attaches it to the composer. The helper owns no channel
+//                 into the renderer, and the request that created this window was answered
+//                 long ago -- a file is the only hand-off that survives that.
+// Captions travel with the request because this file has to stay ASCII; the English strings
+// below are only fallbacks for an old client that does not send any.
 public class DshPinForm : Form {
   private Bitmap bmp;
   private Point dragOffset;
   private bool dragging = false;
+  private bool sizing = false;
+  private Rectangle sizeFrom;
+  private Point sizeCursorFrom;
+  private bool gripHot = false;
+  private string[] menuLabels;
+  private string[] toastLabels;
+  private Timer pillTimer;
+  private string pillText = "";
+  private long pillUntilMs = 0;
+  private const int GripPx = 14;
+  public int LastPercent = 100;
+  public string LastError = "";
+  public string SavePath = "";
+  public string SaveFallback = "";
+  public string HandoffDir = "";
+  public string HandoffFile = "";
 
   public DshPinForm(Bitmap b, Rectangle bounds) {
     bmp = b;
@@ -1261,37 +1294,194 @@ public class DshPinForm : Form {
     ShowInTaskbar = false;
     Cursor = Cursors.SizeAll;
     BackColor = Color.Black;
+    pillTimer = new Timer();
+    pillTimer.Interval = 150;
+    pillTimer.Tick += new EventHandler(OnPillTick);
+    LastPercent = 100;
+  }
+
+  // Set from PowerShell AFTER construction: New-Object -ArgumentList flattens array
+  // arguments, so the caption arrays must not travel through the constructor.
+  public string[] MenuLabels {
+    get { return menuLabels; }
+    set { menuLabels = value; }
+  }
+  public string[] ToastLabels {
+    get { return toastLabels; }
+    set { toastLabels = value; }
+  }
+
+  private string Pick(string[] arr, int i, string fallback) {
+    if (arr == null || i < 0 || i >= arr.Length) return fallback;
+    string s = arr[i];
+    return (s == null || s.Length == 0) ? fallback : s;
+  }
+  private string MenuText(int i) {
+    string[] fall = new string[] { "Send to input box", "Copy image", "Save as PNG", "Zoom in", "Zoom out", "Actual size", "Close" };
+    string f = (i >= 0 && i < fall.Length) ? fall[i] : "?";
+    return Pick(menuLabels, i, f);
+  }
+  // 0 sent / 1 send failed / 2 saved / 3 save failed / 4 copied / 5 copy failed /
+  // 6 nobody took it (host half is old -> a DSH restart is what makes it work)
+  private string ToastText(int i) {
+    string[] fall = new string[] { "Sent to input box", "Send failed", "Saved", "Save failed", "Copied", "Copy failed", "Nobody took it yet - restart DSH" };
+    string f = (i >= 0 && i < fall.Length) ? fall[i] : "?";
+    return Pick(toastLabels, i, f);
+  }
+
+  private string ShortError(string s) {
+    if (s == null) return "";
+    s = s.Replace("\r", " ").Replace("\n", " ");
+    return s.Length > 64 ? s.Substring(0, 64) : s;
+  }
+
+  private void ShowPill(string text) {
+    pillText = text == null ? "" : text;
+    pillUntilMs = DateTime.Now.Ticks / TimeSpan.TicksPerMillisecond + 1500;
+    try { if (!pillTimer.Enabled) pillTimer.Start(); } catch { }
+    try { Invalidate(); } catch { }
+  }
+
+  private void OnPillTick(object sender, EventArgs e) {
+    long now = DateTime.Now.Ticks / TimeSpan.TicksPerMillisecond;
+    if (now < pillUntilMs) return;
+    try { pillTimer.Stop(); } catch { }
+    if (pillText.Length == 0) return;
+    pillText = "";
+    try { Invalidate(); } catch { }
+  }
+
+  private bool InGrip(Point p) {
+    return p.X >= this.ClientSize.Width - GripPx && p.Y >= this.ClientSize.Height - GripPx;
+  }
+
+  /**
+   * One place that changes the size. Aspect ratio is ALWAYS kept: a stretched screenshot is
+   * worse than one the user has to size twice. Clamped to 10%..400% of the captured pixels,
+   * so a wheel slip can never shrink it into a 4 px sliver or blow it up past the screen.
+   */
+  private void ApplyWidth(int w, bool keepCenter) {
+    if (bmp == null || bmp.Width <= 0 || bmp.Height <= 0) return;
+    int minW = Math.Max(48, bmp.Width / 10);
+    int maxW = Math.Max(minW, bmp.Width * 4);
+    if (w < minW) w = minW;
+    if (w > maxW) w = maxW;
+    int h = (int)Math.Round((double)w * (double)bmp.Height / (double)bmp.Width);
+    if (h < 24) h = 24;
+    Rectangle b = this.Bounds;
+    if (keepCenter) {
+      int cx = b.X + b.Width / 2;
+      int cy = b.Y + b.Height / 2;
+      this.Bounds = new Rectangle(cx - w / 2, cy - h / 2, w, h);
+    } else {
+      this.Bounds = new Rectangle(b.X, b.Y, w, h);
+    }
+    LastPercent = (int)Math.Round(100.0 * (double)w / (double)bmp.Width);
+    ShowPill(this.ClientSize.Width.ToString() + " x " + this.ClientSize.Height.ToString() +
+             "   " + LastPercent.ToString() + "%");
   }
 
   protected override void OnPaintBackground(PaintEventArgs e) { }
 
   protected override void OnPaint(PaintEventArgs e) {
-    if (bmp != null) e.Graphics.DrawImage(bmp, 0, 0);
+    Graphics g = e.Graphics;
+    if (bmp != null) {
+      // Enlarging a screenshot: nearest neighbour, so text stays readable instead of turning
+      // into mush. Shrinking: bicubic, because dropping pixels looks ragged otherwise.
+      g.InterpolationMode = (this.ClientSize.Width >= bmp.Width)
+        ? InterpolationMode.NearestNeighbor
+        : InterpolationMode.HighQualityBicubic;
+      g.PixelOffsetMode = PixelOffsetMode.Half;
+      g.DrawImage(bmp, new Rectangle(0, 0, this.ClientSize.Width, this.ClientSize.Height));
+    }
     using (Pen p = new Pen(Color.FromArgb(110, 255, 255, 255), 1f)) {
-      e.Graphics.DrawRectangle(p, 0, 0, this.Width - 1, this.Height - 1);
+      g.DrawRectangle(p, 0, 0, this.Width - 1, this.Height - 1);
+    }
+    if (this.ClientSize.Width > 48 && this.ClientSize.Height > 48) {
+      // Two-tone grip: a screenshot can be any colour, so a single white stroke disappears
+      // on a white page. Dark underneath + light on top reads on both.
+      int alpha = gripHot ? 235 : 140;
+      int x0 = this.ClientSize.Width - 4;
+      int y0 = this.ClientSize.Height - 4;
+      using (Pen shadow = new Pen(Color.FromArgb(alpha, 0, 0, 0), 1f))
+      using (Pen light = new Pen(Color.FromArgb(alpha, 255, 255, 255), 1f)) {
+        for (int k = 0; k < 3; k++) {
+          int d = 4 + k * 4;
+          g.DrawLine(shadow, x0 - d + 1, y0 + 1, x0 + 1, y0 - d + 1);
+          g.DrawLine(light, x0 - d, y0, x0, y0 - d);
+        }
+      }
+    }
+    if (pillText.Length > 0) {
+      using (Font f = new Font("Segoe UI", 8.5f)) {
+        SizeF sz = g.MeasureString(pillText, f);
+        int pw = (int)Math.Ceiling(sz.Width) + 14;
+        int ph = (int)Math.Ceiling(sz.Height) + 6;
+        using (SolidBrush bg = new SolidBrush(Color.FromArgb(205, 18, 18, 22))) {
+          g.FillRectangle(bg, 6, 6, pw, ph);
+        }
+        using (Pen bp = new Pen(Color.FromArgb(120, 255, 255, 255), 1f)) {
+          g.DrawRectangle(bp, 6, 6, pw, ph);
+        }
+        using (SolidBrush fg = new SolidBrush(Color.FromArgb(240, 255, 255, 255))) {
+          g.DrawString(pillText, f, fg, 13, 9);
+        }
+      }
     }
   }
 
   protected override void OnMouseDown(MouseEventArgs e) {
     base.OnMouseDown(e);
-    if (e.Button == MouseButtons.Left) {
-      dragging = true;
-      dragOffset = e.Location;
-    } else {
-      Close();
+    if (e.Button == MouseButtons.Right) {
+      ShowMenu(e.Location);
+      return;
     }
+    if (e.Button != MouseButtons.Left) {
+      Close();
+      return;
+    }
+    if (InGrip(e.Location)) {
+      sizing = true;
+      sizeFrom = this.Bounds;
+      sizeCursorFrom = PointToScreen(e.Location);
+      return;
+    }
+    dragging = true;
+    dragOffset = e.Location;
   }
 
   protected override void OnMouseMove(MouseEventArgs e) {
     base.OnMouseMove(e);
-    if (!dragging) return;
-    Point p = PointToScreen(e.Location);
-    Location = new Point(p.X - dragOffset.X, p.Y - dragOffset.Y);
+    if (sizing) {
+      Point sp = PointToScreen(e.Location);
+      ApplyWidth(sizeFrom.Width + (sp.X - sizeCursorFrom.X), false);
+      return;
+    }
+    if (dragging) {
+      Point p = PointToScreen(e.Location);
+      Location = new Point(p.X - dragOffset.X, p.Y - dragOffset.Y);
+      return;
+    }
+    bool hot = InGrip(e.Location);
+    if (hot != gripHot) {
+      gripHot = hot;
+      Cursor = hot ? Cursors.SizeNWSE : Cursors.SizeAll;
+      try { Invalidate(); } catch { }
+    }
   }
 
   protected override void OnMouseUp(MouseEventArgs e) {
     base.OnMouseUp(e);
+    sizing = false;
     dragging = false;
+  }
+
+  protected override void OnMouseWheel(MouseEventArgs e) {
+    base.OnMouseWheel(e);
+    double f = e.Delta > 0 ? 1.1 : (1.0 / 1.1);
+    int w = (int)Math.Round((double)this.Width * f);
+    if (w == this.Width) w += (e.Delta > 0 ? 1 : -1);
+    ApplyWidth(w, true);
   }
 
   protected override void OnDoubleClick(EventArgs e) {
@@ -1302,6 +1492,222 @@ public class DshPinForm : Form {
   protected override void OnKeyDown(KeyEventArgs e) {
     base.OnKeyDown(e);
     if (e.KeyCode == Keys.Escape) Close();
+  }
+
+  protected override void OnFormClosed(FormClosedEventArgs e) {
+    base.OnFormClosed(e);
+    try { if (pillTimer != null) pillTimer.Dispose(); } catch { }
+    try { if (sendCheck != null) sendCheck.Dispose(); } catch { }
+    try { if (bmp != null) { bmp.Dispose(); bmp = null; } } catch { }
+  }
+
+  private void ShowMenu(Point at) {
+    ContextMenuStrip m = new ContextMenuStrip();
+    m.ShowImageMargin = false;
+    m.ShowCheckMargin = false;
+    m.Items.Add(MenuText(0)).Click += new EventHandler(delegate(object s, EventArgs e) { ActSend(); });
+    m.Items.Add(new ToolStripSeparator());
+    m.Items.Add(MenuText(1)).Click += new EventHandler(delegate(object s, EventArgs e) { ActCopy(); });
+    m.Items.Add(MenuText(2)).Click += new EventHandler(delegate(object s, EventArgs e) { ActSave(); });
+    m.Items.Add(new ToolStripSeparator());
+    m.Items.Add(MenuText(3)).Click += new EventHandler(delegate(object s, EventArgs e) { ActZoom(1.25); });
+    m.Items.Add(MenuText(4)).Click += new EventHandler(delegate(object s, EventArgs e) { ActZoom(0.8); });
+    m.Items.Add(MenuText(5)).Click += new EventHandler(delegate(object s, EventArgs e) { ActActual(); });
+    m.Items.Add(new ToolStripSeparator());
+    m.Items.Add(MenuText(6)).Click += new EventHandler(delegate(object s, EventArgs e) { Close(); });
+    m.Closed += new ToolStripDropDownClosedEventHandler(delegate(object s, ToolStripDropDownClosedEventArgs e) {
+      try { ((ContextMenuStrip)s).Dispose(); } catch { }
+    });
+    m.Show(this, at);
+  }
+
+  private void ActZoom(double f) {
+    ApplyWidth((int)Math.Round((double)this.Width * f), true);
+  }
+
+  private void ActActual() {
+    if (bmp == null) return;
+    ApplyWidth(bmp.Width, true);
+  }
+
+  private void ActCopy() {
+    string err = "";
+    for (int i = 0; i < 4; i++) {
+      try {
+        Clipboard.SetImage(bmp);
+        ShowPill(ToastText(4));
+        return;
+      } catch (Exception ex) {
+        err = ex.Message;
+        System.Threading.Thread.Sleep(60);
+      }
+    }
+    LastError = err;
+    ShowPill(ToastText(5) + ": " + ShortError(err));
+  }
+
+  private string TrySave(string path) {
+    if (path == null || path.Length == 0) return "";
+    try {
+      string dir = System.IO.Path.GetDirectoryName(path);
+      if (dir != null && dir.Length > 0) System.IO.Directory.CreateDirectory(dir);
+      string target = path;
+      string stem = System.IO.Path.GetFileNameWithoutExtension(path);
+      string ext = System.IO.Path.GetExtension(path);
+      int n = 1;
+      while (System.IO.File.Exists(target) && n < 100) {
+        string cand = stem + "-" + n.ToString() + ext;
+        target = (dir != null && dir.Length > 0) ? System.IO.Path.Combine(dir, cand) : cand;
+        n++;
+      }
+      bmp.Save(target, System.Drawing.Imaging.ImageFormat.Png);
+      return target;
+    } catch (Exception ex) {
+      LastError = ex.Message;
+      return "";
+    }
+  }
+
+  private void ActSave() {
+    string used = TrySave(SavePath);
+    if (used == "") used = TrySave(SaveFallback);
+    if (used == "") {
+      ShowPill(ToastText(3) + ": " + ShortError(LastError));
+      return;
+    }
+    ShowPill(ToastText(2) + ": " + System.IO.Path.GetFileName(used));
+  }
+
+  private string JsonEsc(string s) {
+    if (s == null) return "";
+    return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+  }
+
+  /**
+   * The "send to the composer" half: PNG on disk + a tiny JSON marker the host polls.
+   * Write the picture FIRST and the marker last (via .tmp + Move) so the host can never
+   * see a marker that points at a half-written file.
+   *
+   * Honesty: on an old host nothing polls the mailbox, and the user would be told "sent"
+   * forever. A 4 s timer re-reads the marker -- the host deletes it the moment it takes
+   * it, so "still there with our own png in it" means nobody came. Say that instead.
+   */
+  private Timer sendCheck;
+  private string sendPng = "";
+
+  private void ArmSendCheck(string png) {
+    sendPng = png == null ? "" : png;
+    try {
+      if (sendCheck == null) {
+        sendCheck = new Timer();
+        sendCheck.Interval = 4000;
+        sendCheck.Tick += new EventHandler(OnSendCheckTick);
+      }
+      sendCheck.Stop();
+      sendCheck.Start();
+    } catch { }
+  }
+
+  private void OnSendCheckTick(object sender, EventArgs e) {
+    try { sendCheck.Stop(); } catch { }
+    if (sendPng.Length == 0) return;
+    string hf = HandoffFile;
+    if (hf == null || hf.Length == 0) return;
+    if (!System.IO.File.Exists(hf)) return;   // taken = success
+    try {
+      string txt = System.IO.File.ReadAllText(hf, new System.Text.UTF8Encoding(false));
+      if (txt.IndexOf(JsonEsc(sendPng)) < 0) return;   // a newer send replaced it
+    } catch {
+      return;
+    }
+    ShowPill(ToastText(6));
+  }
+
+  /**
+   * The "send to the composer" half: PNG on disk + a tiny JSON marker the host polls.
+   * Write the picture FIRST and the marker last (via .tmp + Move) so the host can never
+   * see a marker that points at a half-written file.
+   */
+  private string WriteHandoff() {
+    LastError = "";
+    try {
+      if (bmp == null) { LastError = "no bitmap"; return ""; }
+      string dir = HandoffDir;
+      if (dir == null || dir.Length == 0) dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dsh-pin");
+      System.IO.Directory.CreateDirectory(dir);
+      string name = "pin-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + ".png";
+      string png = System.IO.Path.Combine(dir, name);
+      bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+      string hf = HandoffFile;
+      if (hf == null || hf.Length == 0) {
+        string up = System.IO.Path.GetDirectoryName(dir);
+        hf = System.IO.Path.Combine(up == null ? dir : up, "pinout.json");
+      }
+      string at = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz");
+      string json = "{\"ok\":true,\"action\":\"attach\",\"png\":\"" + JsonEsc(png) +
+                    "\",\"name\":\"" + JsonEsc(name) +
+                    "\",\"w\":" + bmp.Width.ToString() + ",\"h\":" + bmp.Height.ToString() +
+                    ",\"at\":\"" + JsonEsc(at) + "\"}";
+      string tmp = hf + ".tmp";
+      System.IO.File.WriteAllText(tmp, json, new System.Text.UTF8Encoding(false));
+      try { System.IO.File.Delete(hf); } catch { }
+      System.IO.File.Move(tmp, hf);
+      return png;
+    } catch (Exception ex) {
+      LastError = ex.Message;
+      return "";
+    }
+  }
+
+  private void ActSend() {
+    string png = WriteHandoff();
+    if (png == "") {
+      ShowPill(ToastText(1) + ": " + ShortError(LastError));
+      return;
+    }
+    ArmSendCheck(png);
+    ShowPill(ToastText(0));
+  }
+
+  // Test hooks -- only dev/ovl-selftest.mjs calls these (see the header note). The client
+  // never reaches them: every one of them is a plain public method, no request flag.
+  public void DebugZoom(double f) {
+    ActZoom(f);
+    try { Application.DoEvents(); } catch { }
+  }
+  public string DebugMenu() {
+    string s = "";
+    for (int i = 0; i < 7; i++) {
+      if (i > 0) s = s + "|";
+      s = s + MenuText(i);
+    }
+    return s;
+  }
+  public string DebugSend() {
+    string png = WriteHandoff();
+    if (png.Length > 0) ArmSendCheck(png);
+    return png;
+  }
+  // Runs the "did anybody take it" timer body right now (the real one fires after 4 s, and
+  // the self test closes the pin before that). Returns the pill text it decided on.
+  public string DebugSendCheckNow() {
+    OnSendCheckTick(null, EventArgs.Empty);
+    return pillText;
+  }
+  public string DebugSave() {
+    ActSave();
+    return SavePath;
+  }
+  public void DebugDump(string path) {
+    if (path == null || path.Length == 0) return;
+    try {
+      Invalidate();
+      Application.DoEvents();
+      using (Bitmap shot = new Bitmap(this.ClientSize.Width, this.ClientSize.Height)) {
+        this.DrawToBitmap(shot, new Rectangle(0, 0, shot.Width, shot.Height));
+        shot.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+      }
+    } catch { }
   }
 }
 '@
@@ -1331,6 +1737,19 @@ $lastScriptCheck = 0
 # windows vanish with them.
 $script:pins = @()
 
+# The pin mailbox drops one PNG per "send to input box". The host deletes the one it
+# consumed; this is the belt-and-braces sweep for the ones nobody consumed (DSH was closed
+# before its next heartbeat). Keeps the overlay dir from growing without bound.
+try {
+  $pinMailDir = Join-Path $Dir 'pins'
+  if (Test-Path -LiteralPath $pinMailDir) {
+    $pinCut = (Get-Date).AddHours(-24)
+    Get-ChildItem -LiteralPath $pinMailDir -Filter '*.png' -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -lt $pinCut } |
+      ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch { } }
+  }
+} catch { }
+
 # ================================ serve loop ===================================
 while ($true) {
   if (Test-Path $stopFile) { Log 'stop flag seen'; break }
@@ -1353,6 +1772,12 @@ while ($true) {
     # Pin windows are NON-MODAL, so this loop has to pump messages itself; otherwise
     # they never repaint and never react to the mouse.
     try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+    # Drop the windows the user already closed (Esc / double click / menu). Keeping the
+    # references is what keeps the windows alive in the first place, so this list must be
+    # pruned here or every pin ever shown would be held forever.
+    if (@($script:pins).Length -gt 0) {
+      try { $script:pins = @($script:pins | Where-Object { -not $_.IsDisposed }) } catch { }
+    }
     Start-Sleep -Milliseconds 60
     continue
   }
@@ -1514,8 +1939,42 @@ while ($true) {
         $selRect = $form.Selection
         $pinBounds = New-Object System.Drawing.Rectangle -ArgumentList ($vs.X + $selRect.X), ($vs.Y + $selRect.Y), $selRect.Width, $selRect.Height
         $pin = New-Object DshPinForm -ArgumentList $pinBmp, $pinBounds
+        # R67: action menu captions + the two places the picture can go. Chinese text can
+        # only come from the request (this file must stay ASCII); the C# defaults cover an
+        # old client that sends nothing.
+        if ($null -ne $req.pinMenu) {
+          $pm = @()
+          foreach ($v in $req.pinMenu) { $pm = @($pm) + @([string]$v) }
+          $pin.MenuLabels = $pm
+        }
+        if ($null -ne $req.pinToast) {
+          $pt2 = @()
+          foreach ($v in $req.pinToast) { $pt2 = @($pt2) + @([string]$v) }
+          $pin.ToastLabels = $pt2
+        }
+        $pin.SavePath = $outPng
+        if ($null -ne $req.pngFallback) { $pin.SaveFallback = [string]$req.pngFallback }
+        $pin.HandoffDir = Join-Path $Dir 'pins'
+        $pin.HandoffFile = Join-Path $Dir 'pinout.json'
         $pin.Show()
         $script:pins = @($script:pins) + @($pin)
+        # Test channel: no human can click a topmost window from a low-integrity shell, so the
+        # scale math, the caption round-trip and the hand-off file are reported as numbers.
+        if ($req.pinProbe -eq $true) {
+          $w0 = $pin.Width
+          $h0 = $pin.Height
+          $pin.DebugZoom(1.5)
+          $res.pinZoom = @{ w0 = $w0; h0 = $h0; w1 = $pin.Width; h1 = $pin.Height; pct = [int]$pin.LastPercent; srcW = $pinBmp.Width; srcH = $pinBmp.Height }
+          $res.pinMenu = [string]$pin.DebugMenu()
+          $hp = [string]$pin.DebugSend()
+          $hb = 0
+          if ($hp -ne '' -and (Test-Path -LiteralPath $hp)) { $hb = [int64](Get-Item -LiteralPath $hp).Length }
+          $res.pinHandoff = @{ png = $hp; bytes = $hb; file = [string]$pin.HandoffFile; w = $pinBmp.Width; h = $pinBmp.Height }
+          if ($null -ne $req.pinShot) { $pin.DebugDump([string]$req.pinShot) }
+          # The marker is still sitting in the mailbox (nothing polls it here), so the
+          # honesty branch must say "nobody took it" instead of pretending it was delivered.
+          $res.pinSendWarn = [string]$pin.DebugSendCheckNow()
+        }
         if ($req.pinTest -eq $true) {
           # test-only: close the pin after a moment so the self test leaves nothing behind
           $pt = New-Object System.Windows.Forms.Timer

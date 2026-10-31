@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({
 		 * "客户端是不是旧的"就永远判不出来（R38 实测：代码已是新的，回执还报 R33）。
 		 * 现在只有这一行，两处都引用它；`lib/health.mjs` 优先按 `CLIENT_BUILD = 'Rxx'` 读。
 		 */
-		const CLIENT_BUILD = 'R60'
+		const CLIENT_BUILD = 'R67'
 
 		/* ══════════════ 代次标记 + 跨热重载的 DOM 清理（R38）══════════════
 		 *
@@ -2567,6 +2567,12 @@ window.__ModuleLoader__.load({
 					hint: (prefs().hideSelf === true ? '已隐藏 DSH 界面    ' : '') + 'Enter 复制    P 贴图    Esc 后退    Ctrl+Z 撤销    X 线宽    C 颜色',
 					hideSelf: prefs().hideSelf === true,
 					hideTitle: DSH_WINDOW_TITLE,
+					// 贴图窗的右键菜单（R67）。中文只能由这里带进助手：overlay_host.ps1 必须
+					// 零非 ASCII 字节。索引固定：
+					//   menu  0送进输入框 1复制 2保存 3放大 4缩小 5原始大小 6关闭
+					//   toast 0已送出 1送出失败 2已保存 3保存失败 4已复制 5复制失败 6没人来取
+					pinMenu: ['送进输入框', '复制图像', '保存为文件', '放大', '缩小', '原始大小', '关闭'],
+					pinToast: ['已送出，正在贴进输入框', '送出失败', '已保存', '保存失败', '已复制到剪贴板', '复制失败', '界面没来取（重启 DSH 后可用）'],
 				}))
 			} catch (error) {
 				const msg = String((error && error.message) || error)
@@ -2578,7 +2584,9 @@ window.__ModuleLoader__.load({
 			const picked = res !== null && res !== undefined && res.ok === true
 			postDiag('overlay-result', { ok: picked, reason: String((res && res.reason) || ''), w: Number(res && res.w) || 0, h: Number(res && res.h) || 0, ms: Date.now() - t0 })
 			if (picked && res.reason === 'pinned') {
-				toast(res.w + '×' + res.h + ' 已贴到屏幕 · 拖动移动 · 双击或右键关闭', 3600)
+				// R67：贴图窗现在能缩放、也有动作菜单了 —— 这两件事用户不会自己发现，
+				// 所以在贴上去的那一刻就说清楚（右键菜单是"送进输入框"的入口）。
+				toast(res.w + '×' + res.h + ' 已贴到屏幕 · 滚轮缩放 · 拖动移动 · 右键可送进输入框', 4200)
 				return
 			}
 			if (picked) {
@@ -3688,6 +3696,9 @@ window.__ModuleLoader__.load({
 					if (res.hotkeys && typeof res.hotkeys === 'object') shot.hotkeys = res.hotkeys
 					if (typeof res.invoke === 'string' && res.invoke.length > 0) void runInvoke(res.invoke)
 					if (res.deliver && typeof res.deliver === 'object' && res.deliver.dataUrl) void deliverQuiet(res.deliver)
+					// R67：用户在原生贴图窗里点了「送进输入框」。图由助手落到信箱，宿主取走
+					// 再放到这里 —— 贴图窗比产生它的那次请求活得久，只能这么绕一圈。
+					if (res.pin && typeof res.pin === 'object' && res.pin.dataUrl) void receivePin(res.pin)
 				}
 			} catch {
 				/* 宿主没起来时每一拍都会失败 —— 静默，别刷屏 */
@@ -3750,6 +3761,27 @@ window.__ModuleLoader__.load({
 				postDiag('ai-deliver', { id: item.id, attached: attached, note: item.note || '' })
 			} catch (error) {
 				postDiag('ai-deliver-failed', { id: item.id, error: String((error && error.message) || error) })
+			}
+		}
+
+		/**
+		 * 原生贴图窗送来的图（R67）：用户在贴图上右键 →「送进输入框」。
+		 *
+		 * 与 deliverQuiet 刻意不同：**只贴进输入框，不复制、不写 AI 的口径**。
+		 * 用户要的是"把这张刚贴上的图弄进对话框"，多复制一份只会顶掉他剪贴板里原本的东西。
+		 */
+		async function receivePin(item) {
+			try {
+				const blob = await (await fetch(item.dataUrl)).blob()
+				const attached = await attachToComposer(blob, item.name || 'pin.png')
+				toast(
+					attached ? '贴图已送进输入框' : '没能贴进输入框（贴图上右键 → 复制图像，再在输入框里 Ctrl+V）',
+					attached ? 2600 : 5200
+				)
+				postDiag('pin-handoff', { attached: attached, w: Number(item.w) || 0, h: Number(item.h) || 0 })
+			} catch (error) {
+				postDiag('pin-handoff-failed', { error: String((error && error.message) || error) })
+				toast('贴图送进输入框失败：' + String((error && error.message) || error), 4200)
 			}
 		}
 

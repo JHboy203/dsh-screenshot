@@ -35,7 +35,11 @@ QQ 同款截图，按钮挂在**对话输入框「语音」键旁边**（`conver
 
 标注工具：矩形 / 椭圆 / 箭头 / 画笔 / 文字 / 马赛克，八色 + 粗细滑杆，撤销重做（游标模型），
 Enter 完成、Esc 取消、Ctrl+Z/Y、Ctrl+C、Ctrl+S、Ctrl+A 全选、双击全屏。
-另有**贴图**（钉在界面上，拖动移动、Ctrl+滚轮缩放）。
+另有**贴图**（框选后按 `P`，或点工具条上的 📌）：截下来的图变成一块**置顶的小窗**钉在屏幕上 ——
+滚轮或右下角手柄缩放（宽高比不变，左上角显示 `宽 x 高  百分比`）、左键拖动移动、双击 / `Esc` 关闭，
+**右键是动作菜单**：送进输入框 / 复制图像 / 保存为文件 / 放大 / 缩小 / 原始大小 / 关闭。
+「送进输入框」把这张图当附件直接贴进 DSH 的对话框（贴图窗比产生它的那次截图活得久，所以走的是
+「助手落盘 → 宿主心跳取件 → 界面 attach」这条接力；老宿主不取件时贴图会明说「界面没来取」）。
 
 工具条（R66 换的皮肤）：一张圆角卡片，九个**矢量图标 + 中文小标题**（矩/箭/笔/马赛克/序号/文字/椭圆/色/撤销），
 激活项是实心底色药丸，鼠标悬停有浅色底；**快捷键提示行搬进卡片**里（以前是工具条下面一行浮空白字）；
@@ -180,7 +184,7 @@ host_selfcheck({plugin:'dsh-screenshot', script:'dev/longshot-lab.mjs',
                 args:['run','40','1','90','14']})                                  # 实验台：区域里有东西每 90ms 重画时跑一次 auto（R61 那个场景）
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/_diag-longshot.mjs'})         # 排障用（不是探针、`dev/_*` 不入库）：跑一次会话并留下所有帧，逐对打印"真实位移 vs 拼接器报的偏移"
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/probe-selftest.mjs'})         # 43 项：像素库/探针库/清单元数据自检（1.5 秒，确定性）
-host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-selftest.mjs'})           # 34 项：**覆盖层端到端**（真实框选 → 标注 → 渲染 → 剪贴板/落盘 → regionOnly → 贴图），并把整个窗体渲染成 form.select/.annotate/.flip.png（R66：最后一张是"选区贴底 → 卡片翻到上方 + hover 态"，且 flipBar/flipAbove 是**数字断言**），约 22 秒
+host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-selftest.mjs'})           # 50 项：**覆盖层端到端**（真实框选 → 标注 → 渲染 → 剪贴板/落盘 → regionOnly → 贴图），并把整个窗体渲染成 form.select/.annotate/.flip.png（R66：最后一张是"选区贴底 → 卡片翻到上方 + hover 态"，且 flipBar/flipAbove 是**数字断言**）。R67 起贴图那段报数字：缩放 150% 且宽高比不变、七项中文菜单穿过 ASCII 闸门、`pinout.json`+PNG 落进信箱、`takePinHandoff` 取一次即删、越界路径被拒，并把贴图窗渲成 pin.png，约 26 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/ovl-skin-shot.mjs',
                 args:['--dir','<上面那个 DSH_OVERLAY_DIR>']})                      # **渲染 → 裁图 → 放大**（R66）：从 paint 代码的常量**算**出卡片/角标/放大镜的矩形，一次出 zoom/bar|flip|badge|loupe.png（3 倍，NEAREST），1 秒
 host_selfcheck({plugin:'dsh-screenshot', script:'dev/stitch-tex-probe.mjs'})       # 36 项：**拼接器在真实页面纹理上**（真截屏 → 造长页面 → 切已知帧 → 与真值逐像素比）：滚动 / 区域里有动画 / 同位置重复帧 / 跳太远 / **窄重叠（25%）** / **窄重叠且动画压在重叠带里**，约 35 秒（R63 起；R65 加后两条）。锁屏或屏幕上没有**互不相同**的纹理时**退 2**（env），不是回归
@@ -547,6 +551,11 @@ mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-screenshot" "<
   助手会重试 4 次；仍失败时**客户端会明说"没复制成功"并留下诊断**，不会假装复制过。
 - 「截图时隐藏 DSH 界面」靠**标题**找窗口（`DeepSeek Harness` 子串匹配）；窗口标题被改得
   面目全非时只会不藏（截图照常），不会报错。
+- **贴图窗（R67）的几条边界**：① 缩放**固定宽高比**（不做自由拉伸 —— 拉扁的截图没有用处），
+  范围 10%–400%；② 滚轮要先点一下贴图（WinForms 的滚轮只发给有焦点的窗口），右键菜单里的
+  放大/缩小/原始大小**不需要焦点**；③ 「送进输入框」靠宿主心跳取件（≤1 秒），**宿主还是旧代码时
+  不会有人来取**，贴图会在 4 秒后明说「界面没来取（重启 DSH 后可用）」而不是一直报"已送出"；
+  ④ 贴图窗是**独立进程里的原生置顶窗**，DSH 退出/助手重启时它会一起消失（图仍在剪贴板/输入框里）。
 - 私有备份仓：按 `.gitignore` 排除了 `node_modules`、运行时缓存、调试 dump 与备份文件；要复现运行请自行 `npm install`（如有依赖）。
 - 文档中出现的 `$DSH_WORKSPACE`、`$TK_ROOT`、`%USERPROFILE%` 等是**占位符**，使用前需替换成本机实际路径。
 

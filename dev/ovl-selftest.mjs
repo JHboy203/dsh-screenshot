@@ -23,7 +23,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { startOverlayHost, overlayPick, overlayStatus, stopOverlayHost, OVERLAY_DIR, OVERLAY_SCRIPT } from '../lib/overlay.mjs'
+import { startOverlayHost, overlayPick, overlayStatus, stopOverlayHost, takePinHandoff, OVERLAY_DIR, OVERLAY_SCRIPT, PIN_HANDOFF_FILE, PIN_MAIL_DIR } from '../lib/overlay.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -216,6 +216,97 @@ async function main() {
 	check('pin branch works', pin.ok === true && pin.reason === 'pinned' && Number(pin.w) === 320, { reason: pin.reason, w: pin.w })
 	check('pin wrote no file', pin.png === '' || pin.png === undefined, { png: pin.png })
 	await sleep(2500)
+
+	// ── 闸门 4b：贴图窗能缩放 / 菜单是中文 / 「送进输入框」的交接真的写出来了（R67）
+	//
+	// 用户原话：「贴图做不到缩放，也不能落到对话框内」。沙箱里没人能点最上层的窗，
+	// 所以这三件事必须由窗体自己报数字：
+	//   ① 缩放：DebugZoom(1.5) 之后宽高都变大、**宽高比不变**、百分比报 150；
+	//   ② 菜单：七项中文能不能穿过「.ps1 零非 ASCII」这道门（中文只能走请求 JSON）；
+	//   ③ 交接：PNG + pinout.json 真的落进了信箱，而且宿主能取走（取一次即删）。
+	// 这三条任意一条坏了，用户在界面上看到的就是"点了没反应"。
+	const pinMenu = ['送进输入框', '复制图像', '保存为文件', '放大', '缩小', '原始大小', '关闭']
+	const pinToast = ['已送出，正在贴进输入框', '送出失败', '已保存', '保存失败', '已复制到剪贴板', '复制失败', '界面没来取（重启 DSH 后可用）']
+	const pinShot = path.join(OVERLAY_DIR, 'pin.png')
+	try { fs.rmSync(PIN_MAIL_DIR, { recursive: true, force: true }) } catch {}
+	try { fs.unlinkSync(PIN_HANDOFF_FILE) } catch {}
+	const probe = await overlayPick({
+		timeoutSec: 20,
+		dim: 55,
+		// 保存目标故意放在这轮目录里（产品的默认值是 ~/Pictures/DSH截图，这里不碰用户目录）
+		png: path.join(OVERLAY_DIR, 'pin-save.png'),
+		selfTest: true,
+		pinTest: true,
+		pinProbe: true,
+		pinShot,
+		pinMenu,
+		pinToast,
+	})
+	const pz = probe.pinZoom || {}
+	console.log('pin probe -> ' + JSON.stringify({ pinned: probe.pinned, zoom: pz, menu: probe.pinMenu, handoff: probe.pinHandoff && { file: probe.pinHandoff.file, bytes: probe.pinHandoff.bytes } }))
+	check('pin probe ran (pinned)', probe.ok === true && probe.pinned === true, { ok: probe.ok, pinned: probe.pinned, reason: probe.reason })
+	check('pin scales up 1.5x', Number(pz.w1) > Number(pz.w0) && Number(pz.h1) > Number(pz.h0), { w0: pz.w0, w1: pz.w1, h0: pz.h0, h1: pz.h1 })
+	check('pin reports 150%', Number(pz.pct) === 150, { pct: pz.pct, w0: pz.w0, w1: pz.w1 })
+	{
+		// 宽高比必须守住：100%/150% 两档的比例差应当 < 1%（整数取整允许差 1px）
+		const a0 = Number(pz.w0) / Number(pz.h0)
+		const a1 = Number(pz.w1) / Number(pz.h1)
+		const drift = Math.abs(a1 - a0) / a0
+		check('pin keeps the aspect ratio', Number.isFinite(a1) && drift < 0.01, { aspect0: a0, aspect1: a1, drift })
+		check('pin scaled from the captured pixels', Number(pz.w0) === 320 && Number(pz.h0) === 240 && Number(pz.srcW) === 320 && Number(pz.srcH) === 240, pz)
+	}
+	check('pin menu captions survived the ASCII-only .ps1', probe.pinMenu === pinMenu.join('|'), { got: probe.pinMenu })
+	// 「没人来取」这条诚实分支：宿主没在轮询时必须说清楚，而不是永远显示"已送出"。
+	// 这里信箱里的标记确实没人取走（探针进程不轮询），所以它必须报第 7 条文案。
+	check('pin says nobody took it when the host is not polling', probe.pinSendWarn === pinToast[6], { got: probe.pinSendWarn, want: pinToast[6] })
+	{
+		const hp = (probe.pinHandoff && probe.pinHandoff.png) || ''
+		const bytes = Number(probe.pinHandoff && probe.pinHandoff.bytes) || 0
+		check('pin handoff png written', hp.length > 0 && fs.existsSync(hp) && bytes > 500, { png: hp, bytes })
+		check('pin handoff json written', fs.existsSync(PIN_HANDOFF_FILE), { file: PIN_HANDOFF_FILE })
+		check('pin shot rendered (visual evidence)', fs.existsSync(pinShot) && fs.statSync(pinShot).size > 5000, { file: pinShot, size: fs.existsSync(pinShot) ? fs.statSync(pinShot).size : 0 })
+	}
+	{
+		// 宿主那一半的取件：一次取走、变成 dataUrl、文件被消费掉
+		const got = takePinHandoff()
+		check('takePinHandoff took the picture', got !== null && got.ok === true && String(got.dataUrl).startsWith('data:image/png;base64,') && got.w === 320 && got.h === 240, got === null ? { got } : { ok: got.ok, w: got.w, h: got.h, bytes: got.bytes, error: got.error })
+		check('takePinHandoff consumed the marker', !fs.existsSync(PIN_HANDOFF_FILE), { file: PIN_HANDOFF_FILE })
+		check('takePinHandoff is one-shot', takePinHandoff() === null)
+	}
+	{
+		// 拒绝外面指进来的路径：这一条防的是"信箱里出现一份能读任意文件的 JSON"
+		fs.mkdirSync(PIN_MAIL_DIR, { recursive: true })
+		fs.writeFileSync(PIN_HANDOFF_FILE, JSON.stringify({ ok: true, png: path.join(OVERLAY_DIR, 'selftest.png'), name: 'evil.png', w: 1, h: 1 }), 'utf8')
+		const bad = takePinHandoff()
+		check('takePinHandoff refuses paths outside the mail dir', bad !== null && bad.ok === false, bad === null ? { bad } : { ok: bad.ok, error: bad.error })
+	}
+	await sleep(1600)
+
+	// ── 闸门 4c：服务类把贴图菜单与探针参数透下去了（R67）──────────
+	// 这一层最容易漏（少透一个字段 = 助手用英文兜底、用户看到英文菜单，且零报错）。
+	{
+		const { createShotService } = await import('../lib/service.mjs')
+		class FakeRemote2 {
+			constructor(ctx, name) {
+				this.ctx = ctx
+				this.name = name
+			}
+		}
+		const svc2 = new (createShotService(FakeRemote2))(null, {})
+		const svcPin = await svc2.overlay(20, JSON.stringify({
+			selfTest: true,
+			pinTest: true,
+			pinProbe: true,
+			png: path.join(OVERLAY_DIR, 'pin-svc.png'),
+			pinMenu,
+			pinToast,
+		}))
+		check('service.overlay 透传 pinMenu/pinToast 且缩放到 150%', svcPin.ok === true && svcPin.pinPercent === 150 && svcPin.pinMenu === pinMenu.join('|'), { ok: svcPin.ok, pct: svcPin.pinPercent, menu: svcPin.pinMenu })
+		check('service.overlay 透传后交接文件仍有字节', svcPin.pinHandoffBytes > 500, { bytes: svcPin.pinHandoffBytes })
+		// 取走这一份，别把信箱留给下一次心跳
+		takePinHandoff()
+	}
+	await sleep(1600)
 
 	// ── 闸门 5：一次失败不许把助手带死 ──────────────────────────────
 	check('helper alive after all picks', overlayStatus().alive === true, { alive: overlayStatus().alive })
