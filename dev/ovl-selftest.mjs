@@ -23,7 +23,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { startOverlayHost, overlayPick, overlayStatus, stopOverlayHost, takePinHandoff, OVERLAY_DIR, OVERLAY_SCRIPT, PIN_HANDOFF_FILE, PIN_MAIL_DIR } from '../lib/overlay.mjs'
+import { startOverlayHost, overlayPick, overlayStatus, stopOverlayHost, pinFromFile, takePinHandoff, OVERLAY_DIR, OVERLAY_SCRIPT, PIN_HANDOFF_FILE, PIN_MAIL_DIR } from '../lib/overlay.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -256,9 +256,28 @@ async function main() {
 		check('pin scaled from the captured pixels', Number(pz.w0) === 320 && Number(pz.h0) === 240 && Number(pz.srcW) === 320 && Number(pz.srcH) === 240, pz)
 	}
 	check('pin menu captions survived the ASCII-only .ps1', probe.pinMenu === pinMenu.join('|'), { got: probe.pinMenu })
+	// R67b：右键菜单必须**能开两次**。第一版每次右键新建一个 ContextMenuStrip、在自己
+	// 的 Closed 里 Dispose —— 第二次 Show 就 "Cannot access a disposed object"，而在真机上
+	// 那是 .NET 的**模态**错误框，会把助手的消息泵堵死（之后每次截图都超时）。
+	check('pin menu opens twice (no disposed-strip crash)', probe.pinMenuCycle === '', { got: probe.pinMenuCycle })
 	// 「没人来取」这条诚实分支：宿主没在轮询时必须说清楚，而不是永远显示"已送出"。
 	// 这里信箱里的标记确实没人取走（探针进程不轮询），所以它必须报第 7 条文案。
 	check('pin says nobody took it when the host is not polling', probe.pinSendWarn === pinToast[6], { got: probe.pinSendWarn, want: pinToast[6] })
+	{
+		// R67c：Ctrl+拖动（把贴图拖进对话框/别的应用）。拖拽本身要鼠标，但"能拖"这件事的
+		// 一半是可验的：图真的落盘了、而且 DataObject 里确实是一个 FileDrop。
+		const df = probe.pinDragFile || {}
+		const dfPath = String(df.png || '')
+		let ok = false
+		let dims = { w: 0, h: 0 }
+		if (dfPath.length > 0 && fs.existsSync(dfPath)) {
+			const buf = fs.readFileSync(dfPath)
+			ok = buf.length > 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
+			dims = { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) }
+		}
+		check('pin drag prep writes a real png for FileDrop', dfPath.length > 0 && ok && Number(df.bytes) > 500, { png: dfPath, bytes: df.bytes })
+		check('pin drag file keeps the pinned size', Number(dims.w) === 320 && Number(dims.h) === 240, dims)
+	}
 	{
 		const hp = (probe.pinHandoff && probe.pinHandoff.png) || ''
 		const bytes = Number(probe.pinHandoff && probe.pinHandoff.bytes) || 0
@@ -307,6 +326,40 @@ async function main() {
 		takePinHandoff()
 	}
 	await sleep(1600)
+
+	// ── 闸门 4d：贴一张**已有的文件**（R67c：长截图 / 录屏抽帧现在也走同一个贴图窗）──
+	//
+	// 以前那两条路用的是页面里的 DOM 贴图（另一套缩放、另一套动作条），同一个"贴图"两种手感。
+	// 现在客户端只交一个 PNG：`pinFromFile` → 助手开同一个 DshPinForm。这里验三件：
+	//   ① 文件能钉上（reason='pin-file'，尺寸来自图片本身）；
+	//   ② 不存在的文件**明确失败**，不是静默什么都不发生；
+	//   ③ 服务类的 `pin(dataUrl)` 走完整条链（dataUrl → 落盘 → 贴图）。
+	{
+		const src = path.join(OVERLAY_DIR, 'selftest.png')
+		const filePin = await pinFromFile(src, { pinTest: true, pinMenu, pinToast })
+		console.log('pin file -> ' + JSON.stringify({ ok: filePin.ok, reason: filePin.reason, w: filePin.w, h: filePin.h, pinW: filePin.pinW, pct: filePin.pinPercent }))
+		check('pinFromFile pins an existing png', filePin.ok === true && filePin.pinned === true && filePin.reason === 'pin-file', { ok: filePin.ok, reason: filePin.reason, error: filePin.error })
+		check('pinFromFile keeps the picture size (320x240 at 100%)', Number(filePin.w) === 320 && Number(filePin.h) === 240 && Number(filePin.pinW) === 320 && Number(filePin.pinPercent) === 100, { w: filePin.w, h: filePin.h, pinW: filePin.pinW, pct: filePin.pinPercent })
+		const missing = await pinFromFile(path.join(OVERLAY_DIR, 'no-such-picture-9f3a.png'), { pinTest: true })
+		check('pinFromFile says WHY a missing file failed', missing.ok !== true && missing.reason === 'pin-file-failed' && String(missing.error).length > 0, { reason: missing.reason, error: missing.error })
+		await sleep(1800)
+	}
+	{
+		const { createShotService } = await import('../lib/service.mjs')
+		class FakeRemote3 {
+			constructor(ctx, name) {
+				this.ctx = ctx
+				this.name = name
+			}
+		}
+		const svc3 = new (createShotService(FakeRemote3))(null, {})
+		const png1x1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+		const svcPin = await svc3.pin(png1x1, JSON.stringify({ pinMenu, pinToast }))
+		check('service.pin takes a dataUrl end to end', svcPin.ok === true && svcPin.pinned === true && svcPin.reason === 'pin-file', { ok: svcPin.ok, reason: svcPin.reason, error: svcPin.error })
+		const bad = await svc3.pin('not-a-data-url', '{}')
+		check('service.pin rejects a non-png payload', bad.ok === false && bad.reason === 'bad-image', { reason: bad.reason, error: bad.error })
+		await sleep(1800)
+	}
 
 	// ── 闸门 5：一次失败不许把助手带死 ──────────────────────────────
 	check('helper alive after all picks', overlayStatus().alive === true, { alive: overlayStatus().alive })

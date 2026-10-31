@@ -3,7 +3,6 @@
  *
  *   node dev/hosttest.mjs            只跑不碰鼠标的部分（1/2/3/5/6）
  *   node dev/hosttest.mjs --auto     额外跑 auto 长截图（会**移动真实鼠标**发滚轮）
- *   node dev/hosttest.mjs --pick     额外跑 pickwin（会**全屏覆盖 5 秒**，到点自己退）
  *   node dev/hosttest.mjs --all      上面两个都跑
  *
  * 为什么要有它：宿主半边跑在 DSH 进程里，出了错只有一行日志。而这里的每一条链路
@@ -36,7 +35,6 @@ const LOG = path.join(SCRATCH, 'scroller.log')
 
 const argv = process.argv.slice(2)
 const WITH_AUTO = argv.includes('--auto') || argv.includes('--all')
-const WITH_PICK = argv.includes('--pick') || argv.includes('--all')
 
 // 必须在 import 之前改道：CACHE_DIR / SHOTS_DIR / REC_DIR 都是模块加载时读的常量。
 process.env.DSH_SHOT_CACHE = path.join(LAB, 'cache')
@@ -743,20 +741,11 @@ let capStitched = false
 	delete process.env.DSH_SHOT_MAX_TOTAL_HEIGHT
 }
 
-/* ─────────────────── 8. pickwin（可选，全屏 5 秒） ─────────────────── */
+/* ─────────────────── 8. pickwin（R67c 已删） ─────────────────── */
 
-if (WITH_PICK) {
-	log('[8] pickwin(5) —— 全屏覆盖 5 秒，到点自动取消')
-	const t0 = Date.now()
-	const res = await svc.pickwin(5)
-	check(
-		'8 pickwin 超时路径',
-		res.ok === false && res.cancelled === true,
-		`ok=${res.ok} cancelled=${res.cancelled} reason="${res.reason}" error="${res.error}" hwnd=${res.hwnd} ms=${res.ms} 墙钟=${Date.now() - t0}ms`
-	)
-} else {
-	log('[8] 跳过 pickwin（没有 --pick；它会全屏覆盖 5 秒）')
-}
+// 「在真实桌面上点一个窗口」那条链在 R67c 删掉了（客户端早没有调用点）。节号 8 留空不重排：
+// 日志里的 [8] 被引用过，重排只会让旧日志对不上。
+log('[8] pickwin 已删除（R67c）—— 跳过')
 
 /* ─────────────────── 9. 常驻抓屏助手 ─────────────────── */
 

@@ -293,9 +293,12 @@ window.__ModuleLoader__.load({
 				{ name: 'action', type: 'Action', opt: true },
 				{ name: 'opts', type: 'Opts', opt: true },
 			], 'Hotkeys'),
-			// 真实桌面上的窗口点选（宿主起全屏选择器）。老宿主没有这个方法 ——
-			// 客户端会先 `typeof shot.api.pickwin === 'function'` 再决定走不走它。
-			desc('pickwin', [{ name: 'timeout', type: 'Timeout', opt: true }], 'PickWin'),
+			// 贴图（R67c）：**任何**图都钉成同一个原生贴图窗。以前长截图 / 录屏抽帧走的是
+			// 页面里那套 DOM 贴图（另一套缩放 + 另一套动作条），同一个"贴图"两种手感。
+			desc('pin', [
+				{ name: 'dataUrl', type: 'DataUrl', opt: true },
+				{ name: 'opts', type: 'Opts', opt: true },
+			], 'Pin'),
 			// 真实桌面上的**框选**（宿主常驻助手出全屏真窗口，盖在别的应用之上）。
 			// 老宿主没有这个方法 —— 客户端先 `typeof shot.api.overlay === 'function'`，
 			// 没有就自动回落到应用内 DOM 覆盖层。
@@ -400,9 +403,7 @@ window.__ModuleLoader__.load({
 .dshot-mi.is-on{color:#4aa3ff}
 .dshot-mi.is-bad{color:#ffb4b4;background:rgba(255,90,90,.14);white-space:normal;max-width:280px;line-height:1.4}
 .dshot-mi-sep{height:1px;background:rgba(255,255,255,.14);margin:4px 2px}
-.dshot-pin{position:fixed;z-index:2147482900;border:1px solid rgba(255,255,255,.28);border-radius:6px;
-  box-shadow:0 8px 30px rgba(0,0,0,.45);cursor:move;background:#111}
-.dshot-pin img{display:block;width:100%;height:100%;border-radius:5px;pointer-events:none}
+/* 关掉按钮：贴图窗（原生）与录屏结果面板共用同一个红点样式（R67c 起不再有 DOM 贴图容器） */
 .dshot-pin-x{position:absolute;right:-9px;top:-9px;width:18px;height:18px;border-radius:50%;background:#ff3b30;
   color:#fff;font-size:11px;line-height:18px;text-align:center;cursor:pointer;border:none;padding:0}
 .dshot-rec{position:fixed;right:18px;top:18px;z-index:2147482900;display:flex;align-items:center;gap:8px;
@@ -413,14 +414,6 @@ window.__ModuleLoader__.load({
 /* 撤销/重做：不可用时**看得见地灰掉**（比"点了没反应"诚实） */
 .dshot-btn.is-off{opacity:.3;cursor:default}
 .dshot-btn.is-off:hover{background:rgba(255,255,255,.08)}
-/* 贴图上的动作条：鼠标移上去才出来，免得平时挡着图 */
-.dshot-pin-bar{position:absolute;left:0;right:0;bottom:0;display:flex;gap:2px;justify-content:center;
-  padding:3px 2px;border-radius:0 0 5px 5px;background:linear-gradient(transparent,rgba(0,0,0,.78));
-  opacity:0;transition:opacity .14s}
-.dshot-pin:hover .dshot-pin-bar{opacity:1}
-.dshot-pin-bar button{appearance:none;border:1px solid rgba(255,255,255,.22);background:rgba(28,28,32,.92);
-  color:#f2f2f4;border-radius:6px;font:inherit;font-size:12px;line-height:1;padding:3px 6px;cursor:pointer}
-.dshot-pin-bar button:hover{background:#0a84ff;border-color:#4aa3ff}
 /* 录屏结果面板：不落盘，先让人看清楚再决定留不留 */
 .dshot-recpanel{position:fixed;right:18px;bottom:18px;width:min(580px,54vw);z-index:2147483007;
   background:#26262b;border:1px solid rgba(255,255,255,.18);border-radius:14px;padding:11px;
@@ -1857,96 +1850,49 @@ window.__ModuleLoader__.load({
 			return false
 		}
 
-		/* ══════════════ 贴图（钉在页面上，可拖可缩放）══════════════ */
+		/* ══════════════ 贴图（R67c：一律走原生贴图窗）══════════════ */
 
-		function pinImage(out) {
-			const id = ++shot.pinId
-			const wrap = document.createElement('div')
-			wrap.className = 'dshot-pin'
-			wrap.dataset.pinId = String(id)
-			const width = Math.min(520, Math.round(out.rect.w / (window.devicePixelRatio || 1)))
-			wrap.style.width = width + 'px'
-			wrap.style.left = Math.max(20, window.innerWidth - width - 60) + 'px'
-			wrap.style.top = 80 + (id % 6) * 26 + 'px'
-			const img = document.createElement('img')
-			img.src = out.dataUrl
-			const close = document.createElement('button')
-			close.className = 'dshot-pin-x'
-			close.type = 'button'
-			close.textContent = '✕'
-			close.title = '关掉这张贴图'
-			close.addEventListener('click', () => wrap.remove())
+		/**
+		 * 贴图窗的右键菜单 / 药丸文案。**中文只能从这里进助手** —— `ps/overlay_host.ps1`
+		 * 必须零非 ASCII 字节（PS 5.1 把无 BOM 的 UTF-8 当 GBK 解码，一句中文注释就会吞掉
+		 * 后面的代码行）。索引是两边约定死的：
+		 *   menu  0送进输入框 1复制 2保存 3放大 4缩小 5原始大小 6关闭
+		 *   toast 0已送出 1送出失败 2已保存 3保存失败 4已复制 5复制失败 6没人来取
+		 */
+		const PIN_MENU = ['送进输入框', '复制图像', '保存为文件', '放大', '缩小', '原始大小', '关闭']
+		const PIN_TOAST = ['已送出，正在贴进输入框', '送出失败', '已保存', '保存失败', '已复制到剪贴板', '复制失败', '界面没来取（重启 DSH 后可用）']
 
-			// 动作条：用户报的「贴图钉在界面上之后只能看着，没法拖进对话框」。
-			// 三条出路（送进输入框 / 复制 / 保存）都是这张图**自己**的 dataUrl 再走一遍
-			// 既定通道，不新增任何宿主接口 —— 少一个能坏的地方。
-			const actions = document.createElement('div')
-			actions.className = 'dshot-pin-bar'
-			const blobOf = async () => await (await fetch(out.dataUrl)).blob()
-			const mk = (label, title, fn) => {
-				const b = document.createElement('button')
-				b.type = 'button'
-				b.textContent = label
-				b.title = title
-				b.addEventListener('click', (ev) => {
-					ev.stopPropagation()
-					ev.preventDefault()
-					void fn(b)
-				})
-				return b
+		/**
+		 * 把一张图钉在屏幕上。
+		 *
+		 * R67c 之前这里有**第二套**实现：自己造一个 `.dshot-pin` div（Ctrl+滚轮缩放 + 自己的
+		 * 动作条），而主截图路径钉的是原生置顶窗 —— 同一个"贴图"两种手感。用户报的
+		 * 「做不到缩放、也不能落到对话框内」正是另一套的毛病。现在统一交给宿主：图落成 PNG，
+		 * 常驻助手开**同一个** DshPinForm（滚轮/手柄缩放 + 右键菜单 + 送进输入框）。
+		 *
+		 * 老宿主没有 `pin` 方法时**如实说**，不再退回那套 DOM 贴图（退回去等于让用户
+		 * 又拿到一个不能缩放、不能进对话框的东西，还以为是新版本）。
+		 */
+		async function pinImage(out) {
+			if (shot.api === null || typeof shot.api.pin !== 'function') {
+				postDiag('pin-host-too-old')
+				toast('贴图要重启 DSH 之后才生效（宿主半边还是旧的）', 4600)
+				return
 			}
-			actions.append(
-				mk('📎 送进输入框', '把这张图贴进输入框', async (b) => {
-					b.disabled = true
-					try {
-						const okAttach = await attachToComposer(await blobOf(), 'pin-' + id + '.png')
-						toast(okAttach ? '已贴进输入框' : '没能贴进输入框（可点 ⧉ 复制，再在输入框里 Ctrl+V）', 3600)
-					} catch (error) {
-						toast('贴进输入框失败：' + String((error && error.message) || error), 4000)
-					}
-					b.disabled = false
-				}),
-				mk('⧉ 复制', '复制这张图到剪贴板', async () => {
-					const okCopy = await copyToClipboard(await blobOf())
-					toast(okCopy ? '已复制到剪贴板' : '复制失败（剪贴板被别的程序占着？）', 3200)
-				}),
-				mk('💾 保存', '保存成文件', async () => {
-					if (shot.api === null) {
-						toast('宿主服务未就绪')
-						return
-					}
-					const res = await shot.api.save(out.dataUrl, 'pin')
-					toast(res && res.ok === true ? '已保存：' + res.path : '保存失败：' + ((res && res.error) || '未知错误'), 4200)
-				})
-			)
-			wrap.append(img, actions, close)
-
-			let dragging = null
-			wrap.addEventListener('mousedown', (ev) => {
-				// 动作条和关闭键上的按下**不是拖动**，否则点按钮会顺手把图挪走
-				if (ev.target === close || actions.contains(ev.target)) return
-				dragging = { dx: ev.clientX - wrap.offsetLeft, dy: ev.clientY - wrap.offsetTop }
-				ev.preventDefault()
-			})
-			const onMove = (ev) => {
-				if (dragging === null) return
-				wrap.style.left = Math.max(0, ev.clientX - dragging.dx) + 'px'
-				wrap.style.top = Math.max(0, ev.clientY - dragging.dy) + 'px'
+			let res
+			try {
+				res = await shot.api.pin(out.dataUrl, JSON.stringify({ pinMenu: PIN_MENU, pinToast: PIN_TOAST }))
+			} catch (error) {
+				postDiag('pin-failed', { error: String((error && error.message) || error) })
+				toast('贴图失败：' + String((error && error.message) || error), 4400)
+				return
 			}
-			const onUp = () => {
-				dragging = null
+			if (res && res.ok === true && res.pinned === true) {
+				toast('已贴到屏幕 · 滚轮缩放 · Ctrl+拖动可拖进对话框 · 右键更多', 4600)
+				postDiag('pin-ok', { w: Number(res.w) || 0, h: Number(res.h) || 0, percent: Number(res.pinPercent) || 100 })
+				return
 			}
-			document.addEventListener('mousemove', onMove, true)
-			document.addEventListener('mouseup', onUp, true)
-			wrap.addEventListener('wheel', (ev) => {
-				if (!ev.ctrlKey) return
-				ev.preventDefault()
-				const w = Math.max(80, Math.min(1200, wrap.offsetWidth - Math.sign(ev.deltaY) * 40))
-				wrap.style.width = w + 'px'
-			}, { passive: false })
-
-			mountBody(wrap)
-			toast('已贴图（拖动移动 · Ctrl+滚轮缩放 · 鼠标移上去有动作条）')
+			toast('贴图失败：' + ((res && (res.error || res.reason)) || '未知错误'), 4600)
 		}
 
 		/* ══════════════ 录屏 ══════════════ */
@@ -2568,11 +2514,9 @@ window.__ModuleLoader__.load({
 					hideSelf: prefs().hideSelf === true,
 					hideTitle: DSH_WINDOW_TITLE,
 					// 贴图窗的右键菜单（R67）。中文只能由这里带进助手：overlay_host.ps1 必须
-					// 零非 ASCII 字节。索引固定：
-					//   menu  0送进输入框 1复制 2保存 3放大 4缩小 5原始大小 6关闭
-					//   toast 0已送出 1送出失败 2已保存 3保存失败 4已复制 5复制失败 6没人来取
-					pinMenu: ['送进输入框', '复制图像', '保存为文件', '放大', '缩小', '原始大小', '关闭'],
-					pinToast: ['已送出，正在贴进输入框', '送出失败', '已保存', '保存失败', '已复制到剪贴板', '复制失败', '界面没来取（重启 DSH 后可用）'],
+					// 零非 ASCII 字节。两边的索引约定见 PIN_MENU / PIN_TOAST 上面的注释。
+					pinMenu: PIN_MENU,
+					pinToast: PIN_TOAST,
 				}))
 			} catch (error) {
 				const msg = String((error && error.message) || error)
@@ -2586,7 +2530,7 @@ window.__ModuleLoader__.load({
 			if (picked && res.reason === 'pinned') {
 				// R67：贴图窗现在能缩放、也有动作菜单了 —— 这两件事用户不会自己发现，
 				// 所以在贴上去的那一刻就说清楚（右键菜单是"送进输入框"的入口）。
-				toast(res.w + '×' + res.h + ' 已贴到屏幕 · 滚轮缩放 · 拖动移动 · 右键可送进输入框', 4200)
+				toast(res.w + '×' + res.h + ' 已贴到屏幕 · 滚轮缩放 · 拖动移动 · Ctrl+拖动可拖进对话框 · 右键更多', 5200)
 				return
 			}
 			if (picked) {
@@ -3154,140 +3098,11 @@ window.__ModuleLoader__.load({
 			return { ok: true, frames: frames, mode: mode, rectText: rectText, drawn: frameEl.style.display !== 'none', label: label.textContent, hint: hint.textContent }
 		}
 
-		/* ══════════════ 窗口选择器 ══════════════ */
-
-		/**
-		 * 「选定要截图的页面」——**在真实桌面上点**。
-		 *
-		 * 用户 2026-10-16 的原话：「截屏界面是作用于电脑的，而不是作用于 DSH，在电脑屏幕搜寻，
-		 * 而不是直接将电脑桌面投射到 DSH 内」。所以走宿主侧的 `ps/pickwindow.ps1`：它铺一层
-		 * 覆盖整个虚拟桌面的罩子，鼠标划过哪个窗口就高亮哪个，单击即选中（QQ/微信那种手感）。
-		 *
-		 * 退路：宿主半边是旧版（没重启、没有 pickwin）时**如实说**，并退回列表式选择器。
-		 * 什么都不说就退回去，用户只会以为"这个功能时灵时不灵"。
-		 */
-		async function showWindowPicker() {
-			if (shot.api === null) {
-				toast('服务未就绪：宿主半边没起来')
-				return
-			}
-			toast('在桌面上点你要截的窗口（Esc 取消）', 3000)
-			let res
-			try {
-				res = await shot.api.pickwin(120)
-			} catch (error) {
-				toast('桌面点选失败：' + String((error && error.message) || error) + '（改用列表）', 5000)
-				void showWindowList()
-				return
-			}
-			if (res === undefined || res === null) {
-				toast('宿主半边是旧版，还没有桌面点选（重启 DSH 后可用）——先用列表选', 5200)
-				postDiag('pickwin-missing')
-				void showWindowList()
-				return
-			}
-			if (res.ok !== true) {
-				if (res.cancelled === true) {
-					postDiag('pickwin-cancel')
-					return
-				}
-				toast('桌面点选失败：' + (res.error || '未知错误') + '（改用列表）', 5200)
-				void showWindowList()
-				return
-			}
-			// R33：`range/mode/pickHwnd/pickTitle` 已随 DOM 截图路径一起取消（loadPrefs 会清掉）。
-			// 这个点选器也没有菜单入口了；保留它只为"万一重新接线"时能看到选中的是谁。
-			postDiag('pickwin-ok', {
-				hwnd: res.hwnd,
-				title: String(res.title || '').slice(0, 60),
-				w: res.w,
-				h: res.h,
-				child: res.child,
-			})
-			toast('已选中：' + String(res.title || res.hwnd).slice(0, 36) + '（' + res.w + '×' + res.h + '）· 请在覆盖层里框它', 4200)
-		}
-
-		/**
-		 * 列表式选择器（**备用**，桌面点选不可用时才走这里）。
-		 * 走 `capture.ps1 -Mode window -Hwnd <n>`，被别的窗口挡住也能拍（-Method print
-		 * 让窗口自己渲染）；最小化的窗口会被还原。
-		 */
-		async function showWindowList() {
-			if (shot.api === null) {
-				toast('服务未就绪')
-				return
-			}
-			let list
-			try {
-				// exclude 传空字符串 = **连 DSH 自己一起列**（用户要能截 DSH 窗口）
-				list = await shot.api.winlist('', 80)
-			} catch (error) {
-				toast('枚举窗口失败：' + String((error && error.message) || error))
-				return
-			}
-			if (!list || list.ok !== true) {
-				toast('枚举窗口失败：' + ((list && list.error) || '未知错误'))
-				return
-			}
-			const wins = Array.isArray(list.windows) ? list.windows : []
-			const rootEl = document.createElement('div')
-			rootEl.className = 'dshot-winlist'
-			const box = document.createElement('div')
-			box.className = 'dshot-winbox'
-			const head = document.createElement('div')
-			head.className = 'dshot-winhead'
-			head.innerHTML = ''
-			const title = document.createElement('span')
-			title.textContent = '选一个要截的窗口'
-			const sub = document.createElement('small')
-			sub.textContent = wins.length + ' 个 · 挡住也能拍 · Esc 取消'
-			head.append(title, sub)
-			const grid = document.createElement('div')
-			grid.className = 'dshot-wingrid'
-			if (wins.length === 0) {
-				const empty = document.createElement('div')
-				empty.className = 'dshot-win'
-				empty.textContent = '没有可截的窗口'
-				grid.appendChild(empty)
-			}
-			const closePicker = () => {
-				document.removeEventListener('keydown', onKey, true)
-				rootEl.remove()
-			}
-			const onKey = (ev) => {
-				if (ev.key === 'Escape') {
-					ev.preventDefault()
-					ev.stopPropagation()
-					closePicker()
-				}
-			}
-			for (const w of wins) {
-				const b = document.createElement('button')
-				b.type = 'button'
-				b.className = 'dshot-win'
-				const name = document.createElement('b')
-				name.textContent = w.title || '(无标题)'
-				const meta = document.createElement('span')
-				meta.textContent = w.w + '×' + w.h + (w.min ? ' · 最小化' : '') + ' · ' + w.class
-				b.append(name, meta)
-				b.addEventListener('click', () => {
-					closePicker()
-					// R33：这个窗口选择器已经没有菜单入口（选窗口截图随 DOM 路径一起取消了）。
-					// 万一被重新接线，也只会走唯一入口（原生覆盖层），不会退回 DOM 那套。
-					toast('已选定窗口：' + (w.title || w.hwnd) + '（现在请在覆盖层里框它）', 2600)
-					doShotEntry()
-				})
-				grid.appendChild(b)
-			}
-			box.append(head, grid)
-			rootEl.appendChild(box)
-			// 点空白处关掉
-			rootEl.addEventListener('mousedown', (ev) => {
-				if (ev.target === rootEl) closePicker()
-			})
-			document.addEventListener('keydown', onKey, true)
-			mountBody(rootEl)
-		}
+		/* R67c：这里原本有「在真实桌面上点选窗口」（`showWindowPicker`，走 `ps/pickwindow.ps1`）
+		   和它的列表式备用（`showWindowList`）。R33 取消「点选窗口截图」之后两者**都没有调用点**
+		   —— `grep showWindowPicker` 只有定义本身。留着的唯一效果是让静态契约、宿主服务
+		   （`service.pickwin`）、wire 描述符、`ps/pickwindow.ps1` 全都以为它们还活着。
+		   这一轮连同那四层一起删掉（见交接文件 R67c 一节）。 */
 
 		/* ══════════════ AI 直连桥：让 AI 驱动这个真实客户端 ══════════════ */
 
@@ -3500,7 +3315,8 @@ window.__ModuleLoader__.load({
 					prefs: prefs(),
 					overlay: overlaySnapshot(),
 					recording: shot.recording === true,
-					pins: document.querySelectorAll('.dshot-pin').length,
+					// R67c：贴图不再是页面里的节点（原生贴图窗在助手进程里），所以这里恒为 0。
+					pins: 0,
 					recPanel: document.querySelector('.dshot-recpanel') !== null,
 					longBar: document.querySelector('.dshot-longbar') !== null,
 					menuRows: [...document.querySelectorAll('.dshot-mi')].map((r) => r.textContent),
@@ -3513,7 +3329,7 @@ window.__ModuleLoader__.load({
 				if (op.sel) el = document.querySelector(String(op.sel))
 				else if (op.text !== undefined) {
 					const want = String(op.text)
-					const pool = [...document.querySelectorAll('.dshot-bar button, .dshot-mi, .dshot-btn, .dshot-recpanel button, .dshot-longbar button, .dshot-pin-bar button, button')]
+					const pool = [...document.querySelectorAll('.dshot-bar button, .dshot-mi, .dshot-btn, .dshot-recpanel button, .dshot-longbar button, button')]
 					el = pool.find((b) => (b.textContent || '').trim() === want) || pool.find((b) => (b.textContent || '').includes(want)) || null
 				}
 				if (el === null) return { op: 'click', ok: false, error: 'not found', text: op.text || '', sel: op.sel || '' }
@@ -3646,7 +3462,7 @@ window.__ModuleLoader__.load({
 				return { op: 'longshot', action: action, ok: false, error: '未知 action（begin/add/status/finish/cancel）' }
 			}
 			if (kind === 'reset') {				if (shot.cover !== null && shot.cover !== undefined) { try { shot.cover.destroy() } catch {} shot.cover = null }
-				document.querySelectorAll('.dshot-menu,.dshot-winlist,.dshot-longroot,.dshot-recpanel,.dshot-palette,.dshot-pin').forEach((n) => n.remove())
+				document.querySelectorAll('.dshot-menu,.dshot-winlist,.dshot-longroot,.dshot-recpanel,.dshot-palette').forEach((n) => n.remove())
 				return { op: 'reset', ok: true }
 			}
 			if (kind === 'eval') {
@@ -4416,7 +4232,6 @@ window.__ModuleLoader__.load({
 				receivePin: receivePin,
 				countAttachments: countComposerAttachments,
 				toast: toast,
-				removePins: () => document.querySelectorAll('.dshot-pin').forEach((n) => n.remove()),
 			}
 			aiBridgeStart()
 
@@ -4446,16 +4261,15 @@ window.__ModuleLoader__.load({
 						Promise.resolve(remote.record(action || undefined, opts || undefined)).then(unwrap),
 					scroll: (rect, opts) => Promise.resolve(remote.scroll(rect || undefined, opts || undefined)).then(unwrap),
 					save: (dataUrl, name) => Promise.resolve(remote.save(dataUrl || undefined, name || undefined)).then(unwrap),
+					// R67c：贴图统一走原生贴图窗。老宿主没有这个方法 → typeof 判断即"重启 DSH"。
+					...(typeof remote.pin === 'function'
+						? { pin: (dataUrl, opts) => Promise.resolve(remote.pin(dataUrl || undefined, opts || undefined)).then(unwrap) }
+						: {}),
 					list: () => Promise.resolve(remote.list()).then(unwrap),
 					status: () => Promise.resolve(remote.status()).then(unwrap),
 					winlist: (exclude, limit) => Promise.resolve(remote.winlist(exclude === undefined ? undefined : exclude, limit)).then(unwrap),
 					poll: (since) => Promise.resolve(remote.poll(since)).then(unwrap),
 					hotkeys: (action, opts) => Promise.resolve(remote.hotkeys(action || undefined, opts || undefined)).then(unwrap),
-					// 老宿主没有 pickwin：包一层，缺了就返回 undefined，让调用方退回列表选择器
-					pickwin: (timeout) =>
-						typeof remote.pickwin === 'function'
-							? Promise.resolve(remote.pickwin(Number.isFinite(timeout) ? timeout : undefined)).then(unwrap)
-							: Promise.resolve(undefined),
 					/**
 					 * 原生覆盖层（M1）。**只在宿主真的提供它时才挂上去** ——
 					 * 这样老宿主（没重启）连 api.overlay 都不存在，feature-detect 自然回落到 DOM。

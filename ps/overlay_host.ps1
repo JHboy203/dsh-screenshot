@@ -187,6 +187,28 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
+// A UI-thread exception must never become a modal dialog in this process: the serve loop
+// pumps messages with Application::DoEvents, so a modal error box would stop the loop and
+// every later capture request would time out (measured: a ContextMenuStrip disposed inside
+// its own Closed handler did exactly that). Install() is called once, right after Add-Type,
+// before any window exists; from then on the exception is appended to a log file.
+public static class OvlCrash {
+  public static string LogPath = "";
+  public static void Install(string path) {
+    LogPath = (path == null) ? "" : path;
+    try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException); } catch { }
+    try { Application.ThreadException += new System.Threading.ThreadExceptionEventHandler(OnThread); } catch { }
+  }
+  private static void OnThread(object sender, System.Threading.ThreadExceptionEventArgs e) {
+    try {
+      if (LogPath.Length > 0) {
+        System.IO.File.AppendAllText(LogPath,
+          DateTime.Now.ToString("o") + " UI-EXCEPTION " + e.Exception.ToString() + "\r\n");
+      }
+    } catch { }
+  }
+}
+
 public class DshShape {
   public int Tool;                  // 0 rect, 1 arrow, 2 pen, 3 mosaic, 4 number
   public Point A;
@@ -1267,6 +1289,10 @@ public class DshPinForm : Form {
   private Point dragOffset;
   private bool dragging = false;
   private bool sizing = false;
+  // R67c: Ctrl + left drag starts an OLE file drag (see StartFileDrag). Armed on MouseDown and
+  // fired only after the pointer has really moved, so Ctrl+click still behaves like a click.
+  private bool dragArmed = false;
+  private Point dragArmAt;
   private Rectangle sizeFrom;
   private Point sizeCursorFrom;
   private bool gripHot = false;
@@ -1446,12 +1472,24 @@ public class DshPinForm : Form {
       sizeCursorFrom = PointToScreen(e.Location);
       return;
     }
+    if ((Control.ModifierKeys & Keys.Control) == Keys.Control) {
+      dragArmed = true;
+      dragArmAt = e.Location;
+      return;
+    }
     dragging = true;
     dragOffset = e.Location;
   }
 
   protected override void OnMouseMove(MouseEventArgs e) {
     base.OnMouseMove(e);
+    if (dragArmed) {
+      if ((e.Button & MouseButtons.Left) != MouseButtons.Left) { dragArmed = false; return; }
+      if (Math.Abs(e.X - dragArmAt.X) + Math.Abs(e.Y - dragArmAt.Y) < 5) return;
+      dragArmed = false;
+      StartFileDrag();
+      return;
+    }
     if (sizing) {
       Point sp = PointToScreen(e.Location);
       ApplyWidth(sizeFrom.Width + (sp.X - sizeCursorFrom.X), false);
@@ -1474,6 +1512,36 @@ public class DshPinForm : Form {
     base.OnMouseUp(e);
     sizing = false;
     dragging = false;
+    dragArmed = false;
+  }
+
+  /**
+   * R67c: drag the picture into another application (the DSH composer included).
+   * Ctrl + left drag on purpose: a plain drag must keep moving the window, and every other
+   * modifier would be even less discoverable (the client toast spells this one out).
+   *
+   * NOTE: DoDragDrop runs its OWN modal loop until the button is released, so while the user is
+   * dragging, this helper does not serve new requests (the serve loop is blocked inside
+   * Application::DoEvents). That is acceptable for a one-second gesture -- and it is exactly
+   * why this is a modifier gesture rather than the default drag.
+   *
+   * The dropped thing is a FILE (DataFormats.FileDrop), which is what Chromium's composer
+   * accepts as an attachment; the file lives in the pin mailbox and is pruned with it.
+   */
+  private void StartFileDrag() {
+    string png = WriteMailPng();
+    if (png == "") {
+      ShowPill(ToastText(1) + ": " + ShortError(LastError));
+      return;
+    }
+    DataObject data = new DataObject();
+    data.SetData(DataFormats.FileDrop, new string[] { png });
+    try {
+      DoDragDrop(data, DragDropEffects.Copy);
+    } catch (Exception ex) {
+      LastError = ex.Message;
+      ShowPill(ToastText(1) + ": " + ShortError(ex.Message));
+    }
   }
 
   protected override void OnMouseWheel(MouseEventArgs e) {
@@ -1498,10 +1566,24 @@ public class DshPinForm : Form {
     base.OnFormClosed(e);
     try { if (pillTimer != null) pillTimer.Dispose(); } catch { }
     try { if (sendCheck != null) sendCheck.Dispose(); } catch { }
+    try { if (menu != null) { menu.Dispose(); menu = null; } } catch { }
     try { if (bmp != null) { bmp.Dispose(); bmp = null; } } catch { }
   }
 
-  private void ShowMenu(Point at) {
+  /**
+   * Send / copy / save / zoom / close.
+   *
+   * R67b: built ONCE and reused. The first version created a strip per right click and
+   * disposed it inside its own Closed handler -- WinForms keeps touching a drop-down after
+   * that event, so the helper threw "Cannot access a disposed object: ContextMenuStrip"
+   * and .NET popped a MODAL error dialog on the UI thread. That is much worse than a
+   * cosmetic bug: the serve loop pumps messages (Application::DoEvents), so a modal dialog
+   * stops the loop and every later capture request times out. Reuse + dispose when the form
+   * closes, and [OvlCrash] turns any future UI exception into a log line instead of a dialog.
+   */
+  private ContextMenuStrip menu = null;
+
+  private ContextMenuStrip BuildMenu() {
     ContextMenuStrip m = new ContextMenuStrip();
     m.ShowImageMargin = false;
     m.ShowCheckMargin = false;
@@ -1515,10 +1597,12 @@ public class DshPinForm : Form {
     m.Items.Add(MenuText(5)).Click += new EventHandler(delegate(object s, EventArgs e) { ActActual(); });
     m.Items.Add(new ToolStripSeparator());
     m.Items.Add(MenuText(6)).Click += new EventHandler(delegate(object s, EventArgs e) { Close(); });
-    m.Closed += new ToolStripDropDownClosedEventHandler(delegate(object s, ToolStripDropDownClosedEventArgs e) {
-      try { ((ContextMenuStrip)s).Dispose(); } catch { }
-    });
-    m.Show(this, at);
+    return m;
+  }
+
+  private void ShowMenu(Point at) {
+    if (menu == null) menu = BuildMenu();
+    menu.Show(this, at);
   }
 
   private void ActZoom(double f) {
@@ -1629,6 +1713,19 @@ public class DshPinForm : Form {
     ShowPill(ToastText(6));
   }
 
+  /** Writes the picture into the mailbox dir and returns its path (NO marker). */
+  private string WriteMailPng() {
+    LastError = "";
+    if (bmp == null) { LastError = "no bitmap"; return ""; }
+    string dir = HandoffDir;
+    if (dir == null || dir.Length == 0) dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dsh-pin");
+    System.IO.Directory.CreateDirectory(dir);
+    string name = "pin-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + ".png";
+    string png = System.IO.Path.Combine(dir, name);
+    bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+    return png;
+  }
+
   /**
    * The "send to the composer" half: PNG on disk + a tiny JSON marker the host polls.
    * Write the picture FIRST and the marker last (via .tmp + Move) so the host can never
@@ -1682,6 +1779,35 @@ public class DshPinForm : Form {
     ActZoom(f);
     try { Application.DoEvents(); } catch { }
   }
+  // R67c: a pinned long screenshot can be 30000 px tall -- never create a window larger than
+  // the screen. Scale DOWN only (a small picture must stay at 100%), and keep it centered.
+  public void FitInto(int maxW, int maxH) {
+    if (bmp == null || maxW <= 0 || maxH <= 0) return;
+    double s = (double)maxW / (double)bmp.Width;
+    double sy = (double)maxH / (double)bmp.Height;
+    if (sy < s) s = sy;
+    if (s >= 0.999) return;
+    int w = (int)Math.Max(24, Math.Round((double)bmp.Width * s));
+    int h = (int)Math.Max(24, Math.Round((double)bmp.Height * s));
+    Rectangle b = this.Bounds;
+    this.Bounds = new Rectangle(b.X + (b.Width - w) / 2, b.Y + (b.Height - h) / 2, w, h);
+    LastPercent = (int)Math.Round(100.0 * (double)w / (double)bmp.Width);
+  }
+  // Test hook: writing the file is the only part of an OLE drag that can be checked without a
+  // mouse. Returns the path ("" on failure), and proves the DataObject really carries a
+  // FileDrop -- the format Chromium's composer accepts.
+  public string DebugDragPrep() {
+    string png = WriteMailPng();
+    if (png == "") return "";
+    try {
+      DataObject d = new DataObject();
+      d.SetData(DataFormats.FileDrop, new string[] { png });
+      if (d.GetDataPresent(DataFormats.FileDrop) != true) return "";
+    } catch {
+      return "";
+    }
+    return png;
+  }
   public string DebugMenu() {
     string s = "";
     for (int i = 0; i < 7; i++) {
@@ -1689,6 +1815,25 @@ public class DshPinForm : Form {
       s = s + MenuText(i);
     }
     return s;
+  }
+  // R67b regression hook: the crash was "create a menu per right click, dispose it in its own
+  // Closed handler" -> the SECOND Show threw "Cannot access a disposed object". Showing and
+  // closing twice exercises exactly that path without a mouse. Returns "" on success.
+  public string DebugMenuCycle() {
+    try {
+      if (menu == null) menu = BuildMenu();
+      menu.Show(this, new Point(4, 4));
+      Application.DoEvents();
+      menu.Close();
+      Application.DoEvents();
+      menu.Show(this, new Point(4, 4));
+      Application.DoEvents();
+      menu.Close();
+      Application.DoEvents();
+      return "";
+    } catch (Exception ex) {
+      return ex.GetType().Name + ": " + ex.Message;
+    }
   }
   public string DebugSend() {
     string png = WriteHandoff();
@@ -1719,6 +1864,12 @@ public class DshPinForm : Form {
 }
 '@
 Log 'form class compiled (M2 annotation)'
+
+# Never let a UI-thread exception pop a modal dialog: the serve loop lives on that thread
+# (Application::DoEvents), so a dialog freezes every later request. Measured R67b: a
+# ContextMenuStrip disposed inside its own Closed handler raised exactly that, and the helper
+# sat behind the .NET error box until the user dismissed it.
+try { [OvlCrash]::Install((Join-Path $Dir 'ui-crash.log')) } catch { Log ('crash handler install failed: ' + $_.Exception.Message) }
 
 # Warm the GDI+ stack once so the first real request is as fast as the rest.
 try {
@@ -1756,6 +1907,27 @@ try {
       ForEach-Object { try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch { } }
   }
 } catch { }
+
+# R67: the pin window takes its captions + destinations from the request (this file is
+# ASCII only, the Chinese strings travel as JSON). Shared by the P-key path and the
+# "pin an existing PNG" path so both produce an identical window.
+function Set-PinProps([object]$pin, [object]$req, [string]$savePng, [string]$saveFallback) {
+  if ($null -ne $req.pinMenu) {
+    $pm = @()
+    foreach ($v in $req.pinMenu) { $pm = @($pm) + @([string]$v) }
+    $pin.MenuLabels = $pm
+  }
+  if ($null -ne $req.pinToast) {
+    $pt2 = @()
+    foreach ($v in $req.pinToast) { $pt2 = @($pt2) + @([string]$v) }
+    $pin.ToastLabels = $pt2
+  }
+  $pin.SavePath = $savePng
+  if ($null -ne $req.pngFallback) { $pin.SaveFallback = [string]$req.pngFallback }
+  elseif ($saveFallback -ne '') { $pin.SaveFallback = $saveFallback }
+  $pin.HandoffDir = Join-Path $Dir 'pins'
+  $pin.HandoffFile = Join-Path $Dir 'pinout.json'
+}
 
 # ================================ serve loop ===================================
 while ($true) {
@@ -1830,6 +2002,60 @@ while ($true) {
   $hideSelf = ($req.hideSelf -eq $true)
   $hideTitle = ''
   if ($null -ne $req.hideTitle) { $hideTitle = [string]$req.hideTitle }
+
+  # ---- R67c: pin an existing picture (long screenshot / recorded frame / any data URL) ----
+  # Before this, those flows used a SECOND pin implementation inside the page (a DOM div with
+  # its own zoom + its own send-to-input-box bar), so the same "pin" behaved differently
+  # depending on where you started. Now every pin is this same native window; the client only
+  # has to hand over a PNG file.
+  if ($null -ne $req.pinShow) {
+    $pinSrc = [string]$req.pinShow
+    try {
+      if (-not (Test-Path -LiteralPath $pinSrc)) { throw ('file not found: ' + $pinSrc) }
+      $src = [System.Drawing.Image]::FromFile($pinSrc)
+      $pw = [int]$src.Width
+      $ph = [int]$src.Height
+      $pb = New-Object System.Drawing.Bitmap -ArgumentList $pw, $ph
+      $pg = [System.Drawing.Graphics]::FromImage($pb)
+      try { $pg.DrawImage($src, 0, 0, $pw, $ph) } finally { $pg.Dispose() }
+      $src.Dispose()
+      $cx = $vs.X + [int](($vs.Width - $pw) / 2)
+      $cy = $vs.Y + [int](($vs.Height - $ph) / 2)
+      $pinBounds = New-Object System.Drawing.Rectangle -ArgumentList $cx, $cy, $pw, $ph
+      $pinFile = New-Object DshPinForm -ArgumentList $pb, $pinBounds
+      Set-PinProps $pinFile $req $outPng ''
+      # A long screenshot can be 30000 px tall: never create a window bigger than the screen.
+      $pinFile.FitInto([int]($vs.Width * 0.8), [int]($vs.Height * 0.8))
+      $pinFile.Show()
+      $script:pins = @($script:pins) + @($pinFile)
+      if ($req.pinTest -eq $true) {
+        $pt3 = New-Object System.Windows.Forms.Timer
+        $pt3.Interval = 1500
+        $pt3.Add_Tick({
+          $pt3.Stop()
+          foreach ($pp in @($script:pins)) { try { $pp.Close() } catch { } }
+          $script:pins = @()
+        })
+        $script:ovPinTimer = $pt3
+        $pt3.Start()
+      }
+      $res.ok = $true
+      $res.pinned = $true
+      $res.reason = 'pin-file'
+      $res.w = $pw
+      $res.h = $ph
+      $res.pinW = $pinFile.Width
+      $res.pinH = $pinFile.Height
+      $res.pinPercent = [int]$pinFile.LastPercent
+      Log ('pinned file ' + $pw + 'x' + $ph + ' -> window ' + $pinFile.Width + 'x' + $pinFile.Height)
+    } catch {
+      $res.reason = 'pin-file-failed'
+      $res.error = $_.Exception.Message
+      Log ('pin file failed: ' + $_.Exception.Message)
+    }
+    Write-Json $resFile $res
+    continue
+  }
 
   $script:ovTicks = $timeoutSec * 2
   $script:ovForm = $null
@@ -1956,23 +2182,7 @@ while ($true) {
         $selRect = $form.Selection
         $pinBounds = New-Object System.Drawing.Rectangle -ArgumentList ($vs.X + $selRect.X), ($vs.Y + $selRect.Y), $selRect.Width, $selRect.Height
         $pin = New-Object DshPinForm -ArgumentList $pinBmp, $pinBounds
-        # R67: action menu captions + the two places the picture can go. Chinese text can
-        # only come from the request (this file must stay ASCII); the C# defaults cover an
-        # old client that sends nothing.
-        if ($null -ne $req.pinMenu) {
-          $pm = @()
-          foreach ($v in $req.pinMenu) { $pm = @($pm) + @([string]$v) }
-          $pin.MenuLabels = $pm
-        }
-        if ($null -ne $req.pinToast) {
-          $pt2 = @()
-          foreach ($v in $req.pinToast) { $pt2 = @($pt2) + @([string]$v) }
-          $pin.ToastLabels = $pt2
-        }
-        $pin.SavePath = $outPng
-        if ($null -ne $req.pngFallback) { $pin.SaveFallback = [string]$req.pngFallback }
-        $pin.HandoffDir = Join-Path $Dir 'pins'
-        $pin.HandoffFile = Join-Path $Dir 'pinout.json'
+        Set-PinProps $pin $req $outPng ''
         $pin.Show()
         $script:pins = @($script:pins) + @($pin)
         # Test channel: no human can click a topmost window from a low-integrity shell, so the
@@ -1983,6 +2193,10 @@ while ($true) {
           $pin.DebugZoom(1.5)
           $res.pinZoom = @{ w0 = $w0; h0 = $h0; w1 = $pin.Width; h1 = $pin.Height; pct = [int]$pin.LastPercent; srcW = $pinBmp.Width; srcH = $pinBmp.Height }
           $res.pinMenu = [string]$pin.DebugMenu()
+          # R67b: open/close the action menu twice -- the old "dispose in Closed" version
+          # threw here (Cannot access a disposed object), and in production that became a
+          # modal .NET dialog that froze the serve loop.
+          $res.pinMenuCycle = [string]$pin.DebugMenuCycle()
           $hp = [string]$pin.DebugSend()
           $hb = 0
           if ($hp -ne '' -and (Test-Path -LiteralPath $hp)) { $hb = [int64](Get-Item -LiteralPath $hp).Length }
@@ -1991,6 +2205,12 @@ while ($true) {
           # The marker is still sitting in the mailbox (nothing polls it here), so the
           # honesty branch must say "nobody took it" instead of pretending it was delivered.
           $res.pinSendWarn = [string]$pin.DebugSendCheckNow()
+          # R67c: Ctrl+drag preparation -- the file exists and the DataObject carries a
+          # FileDrop (the format Chromium's composer accepts). The drag itself needs a mouse.
+          $dp = [string]$pin.DebugDragPrep()
+          $dpb = 0
+          if ($dp -ne '' -and (Test-Path -LiteralPath $dp)) { $dpb = [int64](Get-Item -LiteralPath $dp).Length }
+          $res.pinDragFile = @{ png = $dp; bytes = $dpb; w = $pinBmp.Width; h = $pinBmp.Height }
         }
         if ($req.pinTest -eq $true) {
           # test-only: close the pin after a moment so the self test leaves nothing behind
