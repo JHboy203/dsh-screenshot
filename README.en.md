@@ -38,9 +38,10 @@ There is also **pinning an image** (press `P` after selecting, or the 📌 butto
 window** on the screen — the wheel or the bottom-right grip scales it (aspect ratio kept, a `W x H  N%` pill shows at the
 top left), left drag moves it, double-click / `Esc` closes it, and **right click opens an action menu**: send to the input
 box / copy image / save as PNG / zoom in / zoom out / actual size / close. "Send to the input box" attaches the picture to
-DSH's composer straight away (the pinned window outlives the capture that produced it, so this runs as "helper writes a
-file → the host picks it up on its heartbeat → the renderer attaches it"; with an old host that never polls, the pin says
-so instead of pretending).
+DSH's composer straight away **and brings DSH to the front** (the next step is typing there; it also avoids "a pin that covers
+the whole DSH window makes Chromium treat it as occluded and throttle the heartbeat"). The pinned window outlives the capture
+that produced it, so this runs as "helper writes a file → the host picks it up on its heartbeat → the renderer attaches it";
+with an old host that never polls, the pin says so instead of pretending.
 
 The toolbar (reskinned in R66): one rounded card holding nine **vector icons with small captions** (rect / arrow / pen / mosaic / number /
 text / ellipse / colour / undo). The active tool is a solid filled pill, hovering shows a soft highlight, the **shortcut line moved inside

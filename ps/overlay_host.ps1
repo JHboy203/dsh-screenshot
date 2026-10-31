@@ -1594,6 +1594,12 @@ public class DshPinForm : Form {
    */
   private Timer sendCheck;
   private string sendPng = "";
+  // Set when "send to input box" succeeded. The serve loop (PowerShell) picks it up and
+  // brings DSH to the front, because two things need it: the user's next step is typing in
+  // that box, and a pinned picture that covers the whole DSH window makes Chromium treat DSH
+  // as occluded -> background throttling slows the heartbeat that is supposed to pick the
+  // picture up (measured policy: 1/s, then 1/min). Raising DSH removes the occlusion.
+  public bool WantFocus = false;
 
   private void ArmSendCheck(string png) {
     sendPng = png == null ? "" : png;
@@ -1666,6 +1672,7 @@ public class DshPinForm : Form {
       return;
     }
     ArmSendCheck(png);
+    WantFocus = true;
     ShowPill(ToastText(0));
   }
 
@@ -1776,6 +1783,16 @@ while ($true) {
     # references is what keeps the windows alive in the first place, so this list must be
     # pruned here or every pin ever shown would be held forever.
     if (@($script:pins).Length -gt 0) {
+      foreach ($pp in @($script:pins)) {
+        try {
+          if ($pp -ne $null -and $pp.WantFocus -eq $true) {
+            $pp.WantFocus = $false
+            # Same title-based lookup as everything else here (capture.ps1 / hide-self).
+            $hf = [OvlWin]::FindVisible('DeepSeek Harness')
+            if ($hf -ne [IntPtr]::Zero) { [void][OvlWin]::SetForegroundWindow($hf) }
+          }
+        } catch { }
+      }
       try { $script:pins = @($script:pins | Where-Object { -not $_.IsDisposed }) } catch { }
     }
     Start-Sleep -Milliseconds 60
